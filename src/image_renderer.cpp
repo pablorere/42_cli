@@ -20,6 +20,9 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+
+// Declarations only — the implementation lives in stb_image_resize_impl.cpp.
+#include "stb_image_resize2.h"
 #pragma GCC diagnostic pop
 
 namespace image_renderer {
@@ -27,6 +30,16 @@ namespace image_renderer {
 static std::mutex s_img_mtx;
 static std::unordered_map<std::string, DecodedImage> s_img_cache;
 static std::unordered_map<std::string, std::string>  s_png_cache; // Real PNG payload for Kitty Protocol
+
+// Pre-downsampled buffers for the ANSI half-block path, keyed by
+// "<image-key>@<w>x<h>". Resampling is the expensive part of that path, so we
+// pay it once per (image, target size) instead of on every repaint.
+static std::unordered_map<std::string, DecodedImage> s_scaled_cache;
+static constexpr size_t kScaledCacheLimit = 64;
+
+static std::string scaled_cache_key(const std::string& key, int w, int h) {
+    return key + "@" + std::to_string(w) + "x" + std::to_string(h);
+}
 
 static const char s_b64_chars[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -137,6 +150,12 @@ bool load_image_from_bytes(const std::string& key, const std::string& data) {
     s_img_cache[key] = std::move(img);
     if (!png_bytes.empty()) {
         s_png_cache[key] = std::move(png_bytes);
+    }
+    // Drop any stale downsampled variants of this image.
+    const std::string prefix = key + "@";
+    for (auto it = s_scaled_cache.begin(); it != s_scaled_cache.end();) {
+        if (it->first.rfind(prefix, 0) == 0) it = s_scaled_cache.erase(it);
+        else ++it;
     }
     return true;
 }
@@ -253,6 +272,41 @@ void render_kitty(const std::string& key,
     fflush(stdout);
 }
 
+// Returns a cached render_w x render_h RGB buffer for `key`, resampling the
+// source once with stb_image_resize2 (Mitchell filter) and memoizing the result
+// so repeated repaints (and window drags) are O(area) blits instead of O(area)
+// resamples.
+static bool get_scaled_rgb(const std::string& key, int render_w, int render_h, DecodedImage& out)
+{
+    if (render_w <= 0 || render_h <= 0) return false;
+    const std::string sk = scaled_cache_key(key, render_w, render_h);
+
+    std::lock_guard<std::mutex> lk(s_img_mtx);
+    auto cached = s_scaled_cache.find(sk);
+    if (cached != s_scaled_cache.end()) {
+        out = cached->second;
+        return true;
+    }
+
+    auto it = s_img_cache.find(key);
+    if (it == s_img_cache.end()) return false;
+    const DecodedImage& src = it->second;
+    if (src.width <= 0 || src.height <= 0 || src.rgb.empty()) return false;
+
+    DecodedImage dst;
+    dst.width  = render_w;
+    dst.height = render_h;
+    dst.rgb.resize(static_cast<size_t>(render_w) * static_cast<size_t>(render_h) * 3);
+
+    stbir_resize_uint8_srgb(src.rgb.data(), src.width, src.height, 0,
+                            dst.rgb.data(), render_w, render_h, 0, STBIR_RGB);
+
+    if (s_scaled_cache.size() >= kScaledCacheLimit) s_scaled_cache.clear();
+    auto slot = s_scaled_cache.emplace(sk, std::move(dst)).first;
+    out = slot->second;
+    return true;
+}
+
 void render_halfblock(const std::string& key,
                       int screen_row, int screen_col,
                       int box_w, int box_h,
@@ -262,17 +316,15 @@ void render_halfblock(const std::string& key,
     if (!clamp_box_to_terminal(screen_row, screen_col, box_w, box_h, term_rows, term_cols))
         return;
 
-    DecodedImage img;
+    int img_w = 0, img_h = 0;
     {
         std::lock_guard<std::mutex> lk(s_img_mtx);
         auto it = s_img_cache.find(key);
         if (it == s_img_cache.end()) return;
-        img = it->second;
+        img_w = it->second.width;
+        img_h = it->second.height;
     }
-
-    int img_w = img.width;
-    int img_h = img.height;
-    if (img_w <= 0 || img_h <= 0 || img.rgb.empty()) return;
+    if (img_w <= 0 || img_h <= 0) return;
 
     // Terminal character cells have an aspect ratio of approximately 1:2 (width:height).
     // Each half-block ('▀') represents 1/2 of a row vertically and 1 column horizontally,
@@ -297,64 +349,34 @@ void render_halfblock(const std::string& key,
     int render_cols = render_pw;
     int render_rows = render_ph / 2;
 
+    // Resample once (memoized); the draw loop below is a straight 1:1 blit.
+    DecodedImage scaled;
+    if (!get_scaled_rgb(key, render_pw, render_ph, scaled)) return;
+
     // Center image inside the allocated box:
     int pad_left = (box_w - render_cols) / 2;
     int pad_top  = (box_h - render_rows) / 2;
 
-    // High-quality area-averaging box filter
-    auto sample_box = [&](int x0, int x1, int y0, int y1, int& out_r, int& out_g, int& out_b) {
-        x0 = std::clamp(x0, 0, img_w - 1);
-        x1 = std::clamp(x1, x0 + 1, img_w);
-        y0 = std::clamp(y0, 0, img_h - 1);
-        y1 = std::clamp(y1, y0 + 1, img_h);
-
-        uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
-        int count = 0;
-        for (int y = y0; y < y1; ++y) {
-            for (int x = x0; x < x1; ++x) {
-                size_t idx = static_cast<size_t>(y * img_w + x) * 3;
-                r_sum += img.rgb[idx];
-                g_sum += img.rgb[idx + 1];
-                b_sum += img.rgb[idx + 2];
-                count++;
-            }
-        }
-        if (count > 0) {
-            out_r = static_cast<int>(r_sum / count);
-            out_g = static_cast<int>(g_sum / count);
-            out_b = static_cast<int>(b_sum / count);
-        } else {
-            size_t idx = static_cast<size_t>(y0 * img_w + x0) * 3;
-            out_r = img.rgb[idx];
-            out_g = img.rgb[idx + 1];
-            out_b = img.rgb[idx + 2];
-        }
-    };
+    const unsigned char* px = scaled.rgb.data();
+    const int stride = render_pw * 3;
 
     // Render image rows
     for (int y = 0; y < render_rows; ++y) {
         int py_top = y * 2;
         int py_bot = y * 2 + 1;
 
-        int src_y0_top = py_top * img_h / render_ph;
-        int src_y1_top = (py_top + 1) * img_h / render_ph;
-        int src_y0_bot = py_bot * img_h / render_ph;
-        int src_y1_bot = (py_bot + 1) * img_h / render_ph;
-
         int term_row = (screen_row + pad_top + y) + 1;
         int term_col = (screen_col + pad_left) + 1;
         printf("\033[%d;%dH", term_row, term_col);
 
+        const unsigned char* top = px + static_cast<size_t>(py_top) * stride;
+        const unsigned char* bot = px + static_cast<size_t>(py_bot) * stride;
+
         for (int x = 0; x < render_cols; ++x) {
-            int src_x0 = x * img_w / render_cols;
-            int src_x1 = (x + 1) * img_w / render_cols;
-
-            int r1 = 0, g1 = 0, b1 = 0;
-            int r2 = 0, g2 = 0, b2 = 0;
-            sample_box(src_x0, src_x1, src_y0_top, src_y1_top, r1, g1, b1);
-            sample_box(src_x0, src_x1, src_y0_bot, src_y1_bot, r2, g2, b2);
-
-            printf("\033[38;2;%d;%d;%d;48;2;%d;%d;%dm▀", r1, g1, b1, r2, g2, b2);
+            const unsigned char* t = top + x * 3;
+            const unsigned char* b = bot + x * 3;
+            printf("\033[38;2;%d;%d;%d;48;2;%d;%d;%dm▀",
+                   t[0], t[1], t[2], b[0], b[1], b[2]);
         }
     }
     printf("\033[0m\033[?25l\033[1;1H");
