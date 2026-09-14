@@ -17,6 +17,19 @@ struct DecodedImage {
 bool supports_kitty_graphics();
 
 /**
+ * Auto-detects terminals implementing the iTerm2 inline-image protocol
+ * (OSC 1337): iTerm2, WezTerm, Konsole, mintty, ...
+ */
+bool supports_iterm2_images();
+
+/**
+ * True when an external `chafa` binary is available on PATH. Used as an
+ * optional high-quality fallback on terminals supporting neither Kitty nor
+ * the iTerm2 protocol. Never a hard dependency.
+ */
+bool supports_chafa();
+
+/**
  * Loads and caches an image from raw memory bytes (JPEG / PNG).
  * Caches both decoded RGB buffer and raw payload for native graphics.
  * Returns true on success.
@@ -35,10 +48,11 @@ bool has_image(const std::string& key);
 bool image_dimensions(const std::string& key, int& out_w, int& out_h);
 
 /**
- * Unified image renderer:
- * Automatically uses Kitty Graphics Protocol (native screen pixel density,
- * zero pixelation) in Ghostty/Kitty/WezTerm, or falls back to 24-bit ANSI
- * truecolor half-blocks (▀) with clean aspect ratio downsampling.
+ * Unified image renderer, choosing the best available protocol:
+ *   1. Kitty Graphics Protocol (native pixels) — Ghostty/Kitty/WezTerm
+ *   2. iTerm2 inline images (OSC 1337)       — iTerm2/WezTerm/Konsole/mintty
+ *   3. external `chafa` (optional, if on PATH)
+ *   4. 24-bit ANSI truecolor half-blocks (▀) with high-quality downsampling
  *
  * term_rows / term_cols are the current terminal dimensions (in cells). When
  * non-zero the image box is clamped so it can never be drawn past the screen

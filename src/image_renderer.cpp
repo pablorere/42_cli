@@ -9,6 +9,7 @@
 #include <vector>
 #include <algorithm>
 #include <iostream>
+#include <unistd.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -36,6 +37,11 @@ static std::unordered_map<std::string, std::string>  s_png_cache; // Real PNG pa
 // pay it once per (image, target size) instead of on every repaint.
 static std::unordered_map<std::string, DecodedImage> s_scaled_cache;
 static constexpr size_t kScaledCacheLimit = 64;
+
+// Optional external `chafa` bridge: cached ANSI/sixel art for terminals that
+// support neither Kitty nor the iTerm2 protocol (e.g. xterm, foot).
+static std::unordered_map<std::string, std::string> s_chafa_cache;
+static constexpr size_t kChafaCacheLimit = 32;
 
 static std::string scaled_cache_key(const std::string& key, int w, int h) {
     return key + "@" + std::to_string(w) + "x" + std::to_string(h);
@@ -92,6 +98,25 @@ bool supports_kitty_graphics() {
 
     cached_result = 0;
     return false;
+}
+
+bool supports_iterm2_images() {
+    static int cached_result = -1;
+    if (cached_result != -1) return cached_result == 1;
+
+    cached_result = 0;
+    const char* term_prog = std::getenv("TERM_PROGRAM");
+    if (term_prog) {
+        std::string tp(term_prog);
+        if (tp == "iTerm.app" || tp == "WezTerm" || tp == "mintty") cached_result = 1;
+    }
+    const char* lc_term = std::getenv("LC_TERMINAL");
+    if (lc_term && std::string(lc_term) == "iTerm2") cached_result = 1;
+
+    const char* term = std::getenv("TERM");
+    if (term && std::string(term).find("konsole") != std::string::npos) cached_result = 1;
+
+    return cached_result == 1;
 }
 
 void clear_kitty_images() {
@@ -157,6 +182,10 @@ bool load_image_from_bytes(const std::string& key, const std::string& data) {
         if (it->first.rfind(prefix, 0) == 0) it = s_scaled_cache.erase(it);
         else ++it;
     }
+    for (auto it = s_chafa_cache.begin(); it != s_chafa_cache.end();) {
+        if (it->first.rfind(prefix, 0) == 0) it = s_chafa_cache.erase(it);
+        else ++it;
+    }
     return true;
 }
 
@@ -197,6 +226,23 @@ static bool clamp_box_to_terminal(int& row, int& col,
     return box_w >= 4 && box_h >= 2;
 }
 
+// Fits an image inside a cell box, preserving physical aspect ratio. Terminal
+// cells are ~1:2 (width:height), so one cell row equals two cell columns.
+static void fit_box_cells(int img_w, int img_h, int box_w, int box_h,
+                          int& render_rows, int& render_cols)
+{
+    double aspect = (img_h > 0) ? static_cast<double>(img_w) / static_cast<double>(img_h) : 1.0;
+
+    render_rows = box_h;
+    render_cols = static_cast<int>(std::round((render_rows * 2) * aspect));
+    if (render_cols > box_w) {
+        render_cols = box_w;
+        render_rows = static_cast<int>(std::round(render_cols / (2.0 * aspect)));
+    }
+    if (render_rows < 1) render_rows = 1;
+    if (render_cols < 1) render_cols = 1;
+}
+
 void render_kitty(const std::string& key,
                   int screen_row, int screen_col,
                   int box_w, int box_h,
@@ -222,22 +268,8 @@ void render_kitty(const std::string& key,
     }
     if (png_data.empty() || img_w <= 0 || img_h <= 0) return;
 
-    // Preserve 1:1 physical aspect ratio in character cells
-    // In terminal cells, cell width : cell height is approximately 1:2.
-    // So 1 character row in height equals 2 columns in width physical equivalent.
-    double aspect = static_cast<double>(img_w) / static_cast<double>(img_h);
-
-    int max_rows = box_h;
-    int max_cols = box_w;
-
-    int render_rows = max_rows;
-    int render_cols = static_cast<int>(std::round((render_rows * 2) * aspect));
-    if (render_cols > max_cols) {
-        render_cols = max_cols;
-        render_rows = static_cast<int>(std::round(render_cols / (2.0 * aspect)));
-    }
-    if (render_rows < 1) render_rows = 1;
-    if (render_cols < 1) render_cols = 1;
+    int render_rows = 0, render_cols = 0;
+    fit_box_cells(img_w, img_h, box_w, box_h, render_rows, render_cols);
 
     int pad_left = (box_w - render_cols) / 2;
     int pad_top  = (box_h - render_rows) / 2;
@@ -269,6 +301,173 @@ void render_kitty(const std::string& key,
     }
     // Park cursor away and hide cursor to eliminate blinking cursor over pictures
     printf("\033[?25l\033[1;1H");
+    fflush(stdout);
+}
+
+// iTerm2 inline-image protocol (OSC 1337). Supported by iTerm2, WezTerm,
+// Konsole, mintty and a handful of others. Images are anchored to the text
+// cells, so they are cleared automatically when ncurses repaints the region
+// (no explicit delete escape is needed, unlike Kitty).
+void render_iterm2(const std::string& key,
+                   int screen_row, int screen_col,
+                   int box_w, int box_h,
+                   int term_rows, int term_cols)
+{
+    if (box_w <= 0 || box_h <= 0) return;
+    if (!clamp_box_to_terminal(screen_row, screen_col, box_w, box_h, term_rows, term_cols))
+        return;
+
+    std::string png_data;
+    int img_w = 0, img_h = 0;
+    {
+        std::lock_guard<std::mutex> lk(s_img_mtx);
+        auto it = s_png_cache.find(key);
+        if (it == s_png_cache.end()) return;
+        png_data = it->second;
+
+        auto it_img = s_img_cache.find(key);
+        if (it_img != s_img_cache.end()) {
+            img_w = it_img->second.width;
+            img_h = it_img->second.height;
+        }
+    }
+    if (png_data.empty() || img_w <= 0 || img_h <= 0) return;
+
+    int render_rows = 0, render_cols = 0;
+    fit_box_cells(img_w, img_h, box_w, box_h, render_rows, render_cols);
+
+    int pad_left = (box_w - render_cols) / 2;
+    int pad_top  = (box_h - render_rows) / 2;
+
+    int term_row = (screen_row + pad_top) + 1;
+    int term_col = (screen_col + pad_left) + 1;
+
+    std::string b64 = base64_encode(png_data);
+    if (b64.empty()) return;
+
+    printf("\033[%d;%dH", term_row, term_col);
+    // inline=1, width/height in character cells, explicit size (aspect already
+    // preserved by fit_box_cells). Terminated by BEL.
+    printf("\033]1337;File=inline=1;width=%d;height=%d;preserveAspectRatio=0:%s\a",
+           render_cols, render_rows, b64.c_str());
+    printf("\033[?25l\033[1;1H");
+    fflush(stdout);
+}
+
+// ─── Optional chafa bridge ───────────────────────────────────────────────────
+static bool executable_on_path(const char* name) {
+    const char* path = std::getenv("PATH");
+    if (!path) return false;
+    const std::string p(path);
+    size_t start = 0;
+    while (start <= p.size()) {
+        size_t end = p.find(':', start);
+        std::string dir = (end == std::string::npos) ? p.substr(start) : p.substr(start, end - start);
+        if (dir.empty()) dir = ".";
+        if (access((dir + "/" + name).c_str(), X_OK) == 0) return true;
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return false;
+}
+
+bool supports_chafa() {
+    static int cached = -1;
+    if (cached == -1) cached = executable_on_path("chafa") ? 1 : 0;
+    return cached == 1;
+}
+
+// Runs chafa on the cached PNG and memoizes its rendered output for (key, size).
+static bool get_chafa_art(const std::string& key, int cols, int rows, std::string& out) {
+    if (cols <= 0 || rows <= 0) return false;
+    const std::string ck = scaled_cache_key(key, cols, rows);
+
+    std::string png;
+    {
+        std::lock_guard<std::mutex> lk(s_img_mtx);
+        auto it = s_chafa_cache.find(ck);
+        if (it != s_chafa_cache.end()) { out = it->second; return true; }
+        auto pit = s_png_cache.find(key);
+        if (pit == s_png_cache.end()) return false;
+        png = pit->second;
+    }
+    if (png.empty()) return false;
+
+    // chafa reads a file; stage the PNG in a private temp file.
+    char tmpl[] = "/tmp/42cli-chafa-XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < png.size()) {
+        ssize_t n = write(fd, png.data() + off, png.size() - off);
+        if (n <= 0) { close(fd); unlink(tmpl); return false; }
+        off += static_cast<size_t>(n);
+    }
+    close(fd);
+
+    std::string cmd = "chafa --format=symbols --symbols=block --size " +
+                      std::to_string(cols) + "x" + std::to_string(rows) +
+                      " " + tmpl + " 2>/dev/null";
+    std::string art;
+    if (FILE* pipe = popen(cmd.c_str(), "r")) {
+        char buf[4096];
+        size_t got;
+        while ((got = fread(buf, 1, sizeof(buf), pipe)) > 0) art.append(buf, got);
+        pclose(pipe);
+    }
+    unlink(tmpl);
+    if (art.empty()) return false;
+
+    std::lock_guard<std::mutex> lk(s_img_mtx);
+    if (s_chafa_cache.size() >= kChafaCacheLimit) s_chafa_cache.clear();
+    s_chafa_cache[ck] = art;
+    out = std::move(art);
+    return true;
+}
+
+void render_chafa(const std::string& key,
+                  int screen_row, int screen_col,
+                  int box_w, int box_h,
+                  int term_rows, int term_cols)
+{
+    if (box_w <= 0 || box_h <= 0) return;
+    if (!clamp_box_to_terminal(screen_row, screen_col, box_w, box_h, term_rows, term_cols))
+        return;
+
+    int img_w = 0, img_h = 0;
+    {
+        std::lock_guard<std::mutex> lk(s_img_mtx);
+        auto it = s_img_cache.find(key);
+        if (it == s_img_cache.end()) return;
+        img_w = it->second.width;
+        img_h = it->second.height;
+    }
+    if (img_w <= 0 || img_h <= 0) return;
+
+    int render_rows = 0, render_cols = 0;
+    fit_box_cells(img_w, img_h, box_w, box_h, render_rows, render_cols);
+
+    std::string art;
+    if (!get_chafa_art(key, render_cols, render_rows, art)) return;
+
+    int pad_left = (box_w - render_cols) / 2;
+    int pad_top  = (box_h - render_rows) / 2;
+
+    // chafa emits newline-separated rows; blit each one at an explicit cursor
+    // position so the art stays anchored inside its box.
+    int row = screen_row + pad_top + 1;
+    int col = screen_col + pad_left + 1;
+    size_t start = 0;
+    while (start < art.size() && row < screen_row + pad_top + render_rows + 1) {
+        size_t nl = art.find('\n', start);
+        std::string line = (nl == std::string::npos) ? art.substr(start) : art.substr(start, nl - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        printf("\033[%d;%dH%s", row, col, line.c_str());
+        ++row;
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+    printf("\033[0m\033[?25l\033[1;1H");
     fflush(stdout);
 }
 
@@ -390,6 +589,10 @@ void render_image(const std::string& key,
 {
     if (supports_kitty_graphics()) {
         render_kitty(key, screen_row, screen_col, width_chars, height_chars, term_rows, term_cols);
+    } else if (supports_iterm2_images()) {
+        render_iterm2(key, screen_row, screen_col, width_chars, height_chars, term_rows, term_cols);
+    } else if (supports_chafa()) {
+        render_chafa(key, screen_row, screen_col, width_chars, height_chars, term_rows, term_cols);
     } else {
         render_halfblock(key, screen_row, screen_col, width_chars, height_chars, term_rows, term_cols);
     }
