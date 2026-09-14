@@ -598,6 +598,44 @@ void NetworkWorker::handle(const NetTask& task) {
         break;
     }
 
+    case NetTaskKind::FetchClusterProfile: {
+        const std::string login = task.param1;
+        if (login.empty()) break;
+
+        Profile prof;
+        std::string err;
+        const bool ok = network::fetch_user_profile(cookie, login, prof, err);
+
+        {
+            std::lock_guard<std::mutex> lk(state_.mtx);
+            auto& entry    = state_.cluster_profiles[login];
+            entry.loading  = false;
+            if (ok) {
+                entry.profile = prof;
+                entry.loaded  = true;
+            }
+        }
+
+        if (ok) {
+            cache::save_cluster_profile(login, prof);
+
+            // Propagate the freshly fetched display name to the cluster snapshot.
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                for (auto& cs : state_.profile.cluster_students) {
+                    if (cs.login == login && !prof.display_name.empty() &&
+                        cs.full_name != prof.display_name) {
+                        cs.full_name = prof.display_name;
+                        changed = true;
+                    }
+                }
+            }
+            if (changed) persist_state(state_);
+        }
+        break;
+    }
+
     case NetTaskKind::LoadSubjectPreview: {
         const std::string path = task.param1;
         if (path.empty()) break;

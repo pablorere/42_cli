@@ -1,6 +1,7 @@
 #pragma once
 #include "types.hpp"
 #include <string>
+#include <unordered_map>
 
 /**
  * On-disk cache.
@@ -16,6 +17,11 @@ bool save_profile(const Profile& p);
 bool load_profile(Profile& out);
 bool profile_cache_exists();
 void purge_profile();
+
+// ── Cluster student profile cache (keyed by login) ───────────────────────────
+bool save_cluster_profile(const std::string& login, const Profile& p);
+bool load_cluster_profile(const std::string& login, Profile& out);
+int  load_all_cluster_profiles(std::unordered_map<std::string, Profile>& out);
 
 // ── Image byte cache (keyed by source URL) ───────────────────────────────────
 bool save_image_bytes(const std::string& url, const std::string& data);

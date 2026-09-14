@@ -399,25 +399,54 @@ bool do_login(const std::string& username,
         return true;
     }
 
-    // Still on the identity provider: a required action / 2FA gate, or a bad
-    // credential response rendered by Keycloak.
-    if (final_url.find("auth.42.fr") != std::string::npos) {
-        error_out = extract_keycloak_error(post_body);
-        if (error_out.empty())
-            error_out = "Keycloak requires 2FA/OTP. Please use Cookie Login.";
+    // Ground truth: don't trust the redirect chain. If the cookie jar now holds
+    // a working 42 session, the login succeeded even when the final URL was an
+    // unexpected hop (e.g. signin.intra.42.fr or profile-v3.intra.42.fr).
+    if (session_is_valid(cookie_file)) {
+        ensure_classic_profile(cookie_file);
+        return true;
+    }
+
+    // Not logged in. Surface the most specific reason we can find.
+    error_out = extract_keycloak_error(post_body);
+    if (!error_out.empty()) return false;
+
+    const bool looks_like_login =
+        post_body.find("kc-form-login") != std::string::npos ||
+        post_body.find("name=\"username\"") != std::string::npos;
+    const bool looks_like_otp =
+        post_body.find("kc-otp-login-form") != std::string::npos ||
+        post_body.find("name=\"otp\"") != std::string::npos;
+
+    if (looks_like_otp) {
+        error_out = "Keycloak requires an OTP/2FA code. Please use Cookie Login.";
+        return false;
+    }
+    if (looks_like_login) {
+        error_out = "Invalid username or password";
         return false;
     }
 
-    error_out = extract_keycloak_error(post_body);
-    if (error_out.empty()) {
-        if (post_body.find("kc-feedback-text") != std::string::npos ||
-            post_body.find("input-error") != std::string::npos)
-        {
-            error_out = "Invalid username or password";
-        } else {
-            error_out = "Authentication failed (HTTP " + std::to_string(http_code) + ")";
+    // Some other Keycloak step (required action, consent, update profile…).
+    // Report the page title and keep the body so it can be inspected.
+    if (final_url.find("auth.42.fr") != std::string::npos) {
+        std::string title;
+        size_t tp = post_body.find("<title>");
+        if (tp != std::string::npos) {
+            size_t te = post_body.find("</title>", tp + 7);
+            if (te != std::string::npos)
+                title = post_body.substr(tp + 7, te - tp - 7);
         }
+        error_out = "Keycloak requires an additional step";
+        if (!title.empty()) error_out += ": " + title;
+        error_out += " (page saved to /tmp/intra_cli_login_debug.html)";
+
+        std::ofstream dbg("/tmp/intra_cli_login_debug.html", std::ios::binary);
+        if (dbg.is_open()) dbg << post_body;
+        return false;
     }
+
+    error_out = "Authentication failed (HTTP " + std::to_string(http_code) + ")";
     return false;
 }
 
@@ -490,6 +519,11 @@ bool login_with_cookie(const std::string& cookie_input,
     return false;
 }
 
+// ─── Shared profile-page parsing (used for self and other students) ──────────
+static void parse_profile_pages(const std::string& json_body,
+                                const std::string& user_html,
+                                Profile&           out);
+
 // ─── Profile scraper ──────────────────────────────────────────────────────────
 bool fetch_profile(const std::string& cookie_file, Profile& out, std::string& error_out) {
     const std::string base_url = "https://profile.intra.42.fr";
@@ -539,52 +573,13 @@ bool fetch_profile(const std::string& cookie_file, Profile& out, std::string& er
     out.correction_points = "0";
 
     // 2. Fetch JSON endpoint: https://profile.intra.42.fr/users/<login> with Accept: application/json
+    std::string json_body;
     if (!user_login.empty()) {
-        std::string json_body = http_get_with_accept(
+        json_body = http_get_with_accept(
             "https://profile.intra.42.fr/users/" + user_login,
             cookie_file,
             "application/json"
         );
-
-        if (!json_body.empty() && json_body[0] == '{') {
-            // Full name
-            size_t fn = json_body.find("\"full_name\":\"");
-            if (fn != std::string::npos) {
-                fn += 13;
-                size_t fe = json_body.find('"', fn);
-                if (fe != std::string::npos) out.display_name = json_body.substr(fn, fe - fn);
-            }
-
-            // Cluster location / seat
-            size_t loc_p = json_body.find("\"location\":");
-            if (loc_p != std::string::npos) {
-                loc_p += 11;
-                if (json_body.substr(loc_p, 4) != "null") {
-                    if (json_body[loc_p] == '"') loc_p++;
-                    size_t loce = json_body.find_first_of("\",", loc_p);
-                    if (loce != std::string::npos) out.location = json_body.substr(loc_p, loce - loc_p);
-                }
-            }
-
-            // Cursus level e.g. "42cursus":{"level":4.62}
-            size_t lp = json_body.find("\"level\":");
-            if (lp != std::string::npos) {
-                lp += 8;
-                size_t le = json_body.find_first_of(",}", lp);
-                if (le != std::string::npos) {
-                    std::string lvl = json_body.substr(lp, le - lp);
-                    if (!lvl.empty() && lvl != "null") out.level = lvl;
-                }
-            }
-
-            // Avatar image URL
-            size_t ip = json_body.find("\"link\":\"https://cdn.intra.42.fr/users/");
-            if (ip != std::string::npos) {
-                ip += 8;
-                size_t ie = json_body.find('"', ip);
-                if (ie != std::string::npos) out.avatar_url = json_body.substr(ip, ie - ip);
-            }
-        }
     }
 
     // 3. Fetch HTML page: https://profile.intra.42.fr/users/<login> with Accept: text/html
@@ -597,6 +592,53 @@ bool fetch_profile(const std::string& cookie_file, Profile& out, std::string& er
         );
         if (!html_page.empty() && html_page.size() > 5000) {
             user_html = html_page;
+        }
+    }
+
+    parse_profile_pages(json_body, user_html, out);
+    return true;
+}
+
+static void parse_profile_pages(const std::string& json_body,
+                                const std::string& user_html,
+                                Profile&           out) {
+    if (!json_body.empty() && json_body[0] == '{') {
+        // Full name
+        size_t fn = json_body.find("\"full_name\":\"");
+        if (fn != std::string::npos) {
+            fn += 13;
+            size_t fe = json_body.find('"', fn);
+            if (fe != std::string::npos) out.display_name = json_body.substr(fn, fe - fn);
+        }
+
+        // Cluster location / seat
+        size_t loc_p = json_body.find("\"location\":");
+        if (loc_p != std::string::npos) {
+            loc_p += 11;
+            if (json_body.substr(loc_p, 4) != "null") {
+                if (json_body[loc_p] == '"') loc_p++;
+                size_t loce = json_body.find_first_of("\",", loc_p);
+                if (loce != std::string::npos) out.location = json_body.substr(loc_p, loce - loc_p);
+            }
+        }
+
+        // Cursus level e.g. "42cursus":{"level":4.62}
+        size_t lp = json_body.find("\"level\":");
+        if (lp != std::string::npos) {
+            lp += 8;
+            size_t le = json_body.find_first_of(",}", lp);
+            if (le != std::string::npos) {
+                std::string lvl = json_body.substr(lp, le - lp);
+                if (!lvl.empty() && lvl != "null") out.level = lvl;
+            }
+        }
+
+        // Avatar image URL
+        size_t ip = json_body.find("\"link\":\"https://cdn.intra.42.fr/users/");
+        if (ip != std::string::npos) {
+            ip += 8;
+            size_t ie = json_body.find('"', ip);
+            if (ie != std::string::npos) out.avatar_url = json_body.substr(ip, ie - ip);
         }
     }
 
@@ -775,7 +817,39 @@ bool fetch_profile(const std::string& cookie_file, Profile& out, std::string& er
             }
         }
     }
+}
 
+// ─── Other student profile scraper (on-demand cluster inspector) ─────────────
+bool fetch_user_profile(const std::string& cookie_file,
+                        const std::string& login,
+                        Profile&           out,
+                        std::string&       error_out) {
+    if (login.empty()) {
+        error_out = "Login is empty";
+        return false;
+    }
+
+    out = Profile{};
+    out.login             = login;
+    out.display_name      = login;
+    out.level             = "0.0";
+    out.location          = "Unavailable";
+    out.wallet            = "0";
+    out.correction_points = "0";
+
+    const std::string url = "https://profile.intra.42.fr/users/" + login;
+
+    std::string json_body = http_get_with_accept(url, cookie_file, "application/json");
+    std::string user_html = http_get_with_accept(
+        url, cookie_file,
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+
+    if (json_body.empty() && user_html.empty()) {
+        error_out = "Failed to fetch profile for " + login;
+        return false;
+    }
+
+    parse_profile_pages(json_body, user_html, out);
     return true;
 }
 

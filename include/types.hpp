@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <functional>
+#include <unordered_map>
 #include <cctype>
 #include <cstdlib>
 
@@ -185,6 +186,13 @@ struct Profile {
     int                             pending_feedbacks_count = 0;
 };
 
+// ─── Lazily fetched full profile for a cluster student, keyed by login ───────
+struct ClusterProfileEntry {
+    Profile profile;
+    bool    loading = false;
+    bool    loaded  = false;
+};
+
 // ─── Subject (PDF) preview payload produced by the worker ────────────────────
 struct SubjectPreview {
     std::string              path;         // absolute/relative PDF path
@@ -208,6 +216,7 @@ struct SharedState {
     bool             loading      = false;
     bool             slot_pending = false;
     SubjectPreview   preview;
+    std::unordered_map<std::string, ClusterProfileEntry> cluster_profiles;
     std::atomic<bool> quit        {false};
 };
 
@@ -227,6 +236,7 @@ enum class NetTaskKind {
     FetchFeedbacks,
     FetchScaleTeams,
     FetchClusterUser,
+    FetchClusterProfile,
     LoadSubjectPreview,
 };
 

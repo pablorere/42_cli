@@ -154,6 +154,7 @@ int main(int argc, char* argv[]) {
     int  tree_sel     = 0;
     int  cluster_sel  = -1;  // -1 when the current cluster has nobody online
     int  cluster_room = 2; // Default to Cluster 3 (index 2) where students are online
+    int  minimap_hover = -1; // room*CELLS+desk of the hovered dashboard minimap desk
 
     auto cluster_snapshot = [&]() {
         std::lock_guard<std::mutex> lk(state.mtx);
@@ -198,6 +199,31 @@ int main(int argc, char* argv[]) {
             if (cluster_layout::normalize_host(cs.host) == target) return cs.login;
         }
         return {};
+    };
+
+    auto cluster_student_at = [&](int room, int idx) -> ClusterStudent {
+        if (idx < 0) return {};
+        std::string target = cluster_layout::host_of(room, cluster_layout::row_of(idx), cluster_layout::seat_of(idx));
+        std::lock_guard<std::mutex> lk(state.mtx);
+        for (const auto& cs : state.profile.cluster_students) {
+            if (cluster_layout::normalize_host(cs.host) == target) return cs;
+        }
+        return {};
+    };
+
+    // Fetch (and cache) the full profile of a desk's occupant on demand.
+    auto fetch_cluster_profile = [&](int room, int idx) {
+        ClusterStudent cs = cluster_student_at(room, idx);
+        if (cs.login.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            auto& entry = state.cluster_profiles[cs.login];
+            if (!entry.loaded) entry.loading = true;
+            state.status_msg = "Fetching @" + cs.login + " profile…";
+        }
+        if (!cs.cdn_uri.empty() && !image_renderer::has_image(cs.cdn_uri))
+            worker.enqueue({ NetTaskKind::FetchImage, cs.cdn_uri, "" });
+        worker.enqueue({ NetTaskKind::FetchClusterProfile, cs.login, "" });
     };
 
     auto copy_cluster_login = [&](int idx) {
@@ -366,6 +392,18 @@ int main(int argc, char* argv[]) {
 
         // Warm the in-memory image cache from disk so avatars render offline.
         cache::load_all_cached_images();
+
+        // Restore any previously fetched cluster student profiles.
+        std::unordered_map<std::string, Profile> cached_cluster_profiles;
+        if (cache::load_all_cluster_profiles(cached_cluster_profiles) > 0) {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            for (auto& kv : cached_cluster_profiles) {
+                auto& entry   = state.cluster_profiles[kv.first];
+                entry.profile = std::move(kv.second);
+                entry.loaded  = true;
+                entry.loading = false;
+            }
+        }
     }
 
     // ── Main event loop ───────────────────────────────────────────────────────
@@ -383,6 +421,7 @@ int main(int argc, char* argv[]) {
 
         if (current_tab != prev_tab) {
             image_renderer::clear_kitty_images();
+            minimap_hover = -1;
             prev_tab = current_tab;
             if (current_tab == Tab::Cluster) {
                 snap_cluster_selection();
@@ -427,7 +466,8 @@ int main(int argc, char* argv[]) {
                       cluster_room,
                       preview_panel, preview_snap,
                       subject_modal_open, subject_scroll,
-                      action_menu_open, action_items, action_menu_sel);
+                      action_menu_open, action_items, action_menu_sel,
+                      minimap_hover);
 
         int ch = getch();
         if (ch == ERR) continue;
@@ -746,6 +786,11 @@ int main(int argc, char* argv[]) {
         if (ch == KEY_MOUSE) {
             MEVENT ev;
             if (getmouse(&ev) == OK) {
+                // Track the hovered dashboard minimap desk (motion + clicks).
+                MouseHit hover_hit = renderer.hit_test(ev.y, ev.x);
+                minimap_hover = (hover_hit.action == MouseAction::DashMinimap)
+                                    ? hover_hit.index : -1;
+
                 if (ev.bstate & (BUTTON4_PRESSED | BUTTON4_CLICKED)) {
                     move_vertical(-1);
                     continue;
@@ -793,6 +838,13 @@ int main(int argc, char* argv[]) {
                                 image_renderer::clear_kitty_images();
                                 enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
                             }
+                        }
+                        break;
+                    case MouseAction::DashMinimap:
+                        if (hit.index >= 0) {
+                            int mroom = hit.index / cluster_layout::CELLS;
+                            int mdesk = hit.index % cluster_layout::CELLS;
+                            fetch_cluster_profile(mroom, mdesk);
                         }
                         break;
                     default:

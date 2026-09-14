@@ -140,6 +140,15 @@ bool fetch_user_full_name(const std::string& cookie_file,
                           std::string&       error_out);
 
 /**
+ * Scrape another student's public profile page (JSON + HTML) into a Profile.
+ * Used for the on-demand cluster workstations inspector.
+ */
+bool fetch_user_profile(const std::string& cookie_file,
+                        const std::string& login,
+                        Profile&           out,
+                        std::string&       error_out);
+
+/**
  * Fetch raw binary image from URL using session cookies.
  */
 bool fetch_image(const std::string& url,

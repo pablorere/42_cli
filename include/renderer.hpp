@@ -12,6 +12,7 @@ enum class MouseAction {
     ListRow,      // index = absolute row in the active tab's list
     ClusterRoom,  // index = room (0-3)
     ClusterDesk,  // index = desk (0-47)
+    DashMinimap,  // index = room * CELLS + desk (dashboard minimap)
     LoginMethod,  // index = login method (0-2)
     LoginField,   // index = field (0-1)
     ThemeRow,     // index = theme (0-9)
@@ -54,7 +55,8 @@ public:
               int subject_scroll = 0,
               bool action_menu_open = false,
               const std::vector<std::pair<std::string, bool>>& action_items = {},
-              int action_sel = 0);
+              int action_sel = 0,
+              int minimap_hover = -1);
 
     // Overload for simple calling
     void draw(SharedState& state, Tab current_tab,
@@ -96,6 +98,10 @@ private:
     void draw_roadmap  (Profile& p, int sel, int top, int bottom, int left_w,
                         bool preview_panel, const SubjectPreview& pv);
     void draw_cluster  (const Profile& p, int room, int sel, int top, int bottom, int left_w);
+    void draw_cluster_minimap(const Profile& p, int top, int bottom, int panel_w, int hovered);
+    void draw_cluster_tooltip(const Profile& p,
+                              const std::unordered_map<std::string, ClusterProfileEntry>& profiles,
+                              int top, int bottom, int panel_w);
 
     void draw_login_prompt(int login_method, int active_field,
                            const std::string& user_buf,
@@ -116,6 +122,12 @@ private:
     std::vector<Hitbox> hitboxes_;
     ImageBox            preview_img_;
     std::string         image_sig_;
+
+    // Hover geometry for the dashboard cluster minimap (screen cell of the
+    // hovered desk) so the tooltip can be anchored without recomputing layout.
+    struct MinimapBox { int y = 0, x = 0, w = 0; bool valid = false; };
+    MinimapBox          minimap_hover_box_;
+    int                 minimap_hover_ = -1;
 
     int cols_{80};
     int rows_{24};

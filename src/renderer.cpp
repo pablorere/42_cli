@@ -85,8 +85,8 @@ Renderer::Renderer() {
     curs_set(0);
     timeout(80);
 
-    // Enable mouse reporting (clicks + scroll wheel).
-    mousemask(ALL_MOUSE_EVENTS, nullptr);
+    // Enable mouse reporting (clicks, scroll wheel + motion for hover).
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
     mouseinterval(0);
 
     if (has_colors()) {
@@ -182,6 +182,40 @@ static int count_students_in_room(const std::vector<ClusterStudent>& students, i
     return count;
 }
 
+// Room index (0-3) encoded in a profile location such as "c3r1s2"; -1 if the
+// location is unavailable or uses a non-cluster format (e.g. piscine "e1r1p1").
+static int room_from_location(const std::string& loc) {
+    std::string clean = normalize_host(loc);
+    if (clean.size() < 3 || clean[0] != 'c') return -1;
+    size_t i = 1;
+    if (!std::isdigit(static_cast<unsigned char>(clean[i]))) return -1;
+    int room = 0;
+    while (i < clean.size() && std::isdigit(static_cast<unsigned char>(clean[i]))) {
+        room = room * 10 + (clean[i] - '0');
+        ++i;
+    }
+    if (i >= clean.size() || clean[i] != 'r') return -1;
+    return room - 1;
+}
+
+static int busiest_room(const std::vector<ClusterStudent>& students) {
+    int best = 0, best_count = -1;
+    for (int r = 0; r < 4; ++r) {
+        int c = count_students_in_room(students, r);
+        if (c > best_count) { best_count = c; best = r; }
+    }
+    return best;
+}
+
+// Rows reserved for the dashboard minimap panel (border + 8 grid rows + border).
+// Only granted when the student card keeps a usable minimum height.
+static int reserve_map_rows(int top, int bottom) {
+    const int map_rows = 10;
+    const int min_card = 12;
+    if (bottom - top >= map_rows + min_card) return map_rows;
+    return 0;
+}
+
 // Shared geometry for the cluster "LIVE WORKSTATION INSPECTOR" photo frame so
 // both the frame (draw_cluster) and the image (draw) agree and stay on screen.
 struct ClusterPhotoBox {
@@ -266,12 +300,15 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                     int subject_scroll,
                     bool action_menu_open,
                     const std::vector<std::pair<std::string, bool>>& action_items,
-                    int action_sel)
+                    int action_sel,
+                    int minimap_hover)
 {
     getmaxyx(stdscr, rows_, cols_);
     erase();
     hitboxes_.clear();
     preview_img_ = ImageBox{};
+    minimap_hover_ = minimap_hover;
+    minimap_hover_box_ = MinimapBox{};
 
     // Not enough room to lay out anything meaningful — tell the user instead of
     // rendering a crushed interface.
@@ -288,13 +325,15 @@ void Renderer::draw(SharedState& state, Tab current_tab,
     std::string error_msg;
     bool        loading      = false;
     bool        data_ready   = false;
+    std::unordered_map<std::string, ClusterProfileEntry> cluster_profiles;
     {
         std::lock_guard<std::mutex> lk(state.mtx);
-        prof       = state.profile;
-        status_msg = state.status_msg;
-        error_msg  = state.error_msg;
-        loading    = state.loading;
-        data_ready = state.data_ready;
+        prof             = state.profile;
+        status_msg       = state.status_msg;
+        error_msg        = state.error_msg;
+        loading          = state.loading;
+        data_ready       = state.data_ready;
+        cluster_profiles = state.cluster_profiles;
     }
 
     int content_top    = 2;
@@ -331,6 +370,13 @@ void Renderer::draw(SharedState& state, Tab current_tab,
         draw_status_bar(prof.login, status_msg, error_msg, current_tab);
     }
 
+    // Floating cluster inspector for the hovered dashboard minimap desk.
+    if (!login_mode && data_ready && current_tab == Tab::Dashboard &&
+        !theme_switcher_open && !subject_modal && !action_menu_open &&
+        minimap_hover_ >= 0 && minimap_hover_box_.valid) {
+        draw_cluster_tooltip(prof, cluster_profiles, content_top, content_bottom, left_w);
+    }
+
     if (theme_switcher_open) {
         curs_set(0);
         draw_theme_switcher(theme_sel);
@@ -364,7 +410,12 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                                   preview_img_.w, preview_img_.h});
         }
 
-        int avail_h = content_bottom - content_top;
+        int card_bottom = content_bottom;
+        if (current_tab == Tab::Dashboard) {
+            int map_rows = reserve_map_rows(content_top, content_bottom);
+            if (map_rows > 0) card_bottom = content_bottom - map_rows;
+        }
+        int avail_h = card_bottom - content_top;
         if (avail_h >= 20 && left_w >= 24 && !prof.avatar_url.empty()) {
             int avatar_h = (avail_h >= 24) ? 7 : 6;
             placements.push_back({prof.avatar_url, content_top + 2, 3,
@@ -748,7 +799,11 @@ void Renderer::draw_profile_panel(const Profile& p, int top, int bottom, int pan
 // Tab 1: Dashboard
 // ─────────────────────────────────────────────────────────────────────────────
 void Renderer::draw_dashboard(const Profile& p, int subview, int sel, bool inspect, int top, int bottom, int left_w) {
-    draw_profile_panel(p, top, bottom, left_w);
+    int map_rows    = reserve_map_rows(top, bottom);
+    int card_bottom = (map_rows > 0) ? bottom - map_rows : bottom;
+    draw_profile_panel(p, top, card_bottom, left_w);
+    if (map_rows > 0)
+        draw_cluster_minimap(p, card_bottom + 1, bottom, left_w, minimap_hover_);
 
     int rx = left_w;
     int rw = cols_ - rx;
@@ -2648,4 +2703,194 @@ void Renderer::draw_cluster(const Profile& p, int room, int sel, int top, int bo
         }
         } // has_sel
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard: compact cluster minimap + hover inspector
+// ─────────────────────────────────────────────────────────────────────────────
+void Renderer::draw_cluster_minimap(const Profile& p, int top, int bottom,
+                                    int panel_w, int hovered) {
+    if (bottom - top < 3 || panel_w < 20) return;
+
+    const auto& bc = get_border_chars();
+
+    int room = room_from_location(p.location);
+    if (room < 0 || room >= 4) room = busiest_room(p.cluster_students);
+    int online = count_students_in_room(p.cluster_students, room);
+
+    // Frame
+    attron(COLOR_PAIR(CP_BORDER));
+    mvaddstr(top, 0, bc.tl);
+    hline_box(top, 1, panel_w - 2);
+    mvaddstr(top, panel_w - 1, bc.tr);
+    for (int r = top + 1; r < bottom; ++r) {
+        mvaddstr(r, 0, bc.v);
+        fill_row(r, 1, panel_w - 2);
+        mvaddstr(r, panel_w - 1, bc.v);
+    }
+    mvaddstr(bottom, 0, bc.bl);
+    hline_box(bottom, 1, panel_w - 2);
+    mvaddstr(bottom, panel_w - 1, bc.br);
+    attroff(COLOR_PAIR(CP_BORDER));
+
+    // Title overlaid on the top border
+    {
+        std::string title = " ◆ CLUSTER " + std::to_string(room + 1) +
+                            " · " + std::to_string(online) + " ONLINE ";
+        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+        mvprint_clip(top, 2, title, panel_w - 4);
+        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    }
+
+    // 8x6 desk grid
+    int inner_w = panel_w - 2;
+    int label_w = 3;
+    int cell_w  = (inner_w - label_w) / cluster_layout::SEATS;
+    if (cell_w > 9) cell_w = 9;
+    if (cell_w < 3) {
+        label_w = 0;
+        cell_w  = inner_w / cluster_layout::SEATS;
+    }
+    if (cell_w < 2) cell_w = 2;
+    int grid_x = 1 + label_w;
+
+    for (int r = 0; r < cluster_layout::ROWS; ++r) {
+        int y = top + 1 + r;
+        if (y >= bottom) break;
+
+        if (label_w > 0) {
+            attron(COLOR_PAIR(CP_LABEL));
+            mvprintw(y, 1, "R%d", r + 1);
+            attroff(COLOR_PAIR(CP_LABEL));
+        }
+
+        for (int s = 0; s < cluster_layout::SEATS; ++s) {
+            int desk = cluster_layout::index(r, s);
+            int x    = grid_x + s * cell_w;
+            if (x >= panel_w - 1) break;
+
+            int avail = std::min(cell_w, panel_w - 1 - x);
+            const auto* cs = get_student_at_desk(p.cluster_students, room, r, s);
+            if (cs) {
+                add_hitbox(y, x, 1, avail, MouseAction::DashMinimap,
+                           room * cluster_layout::CELLS + desk);
+                if (desk == hovered) minimap_hover_box_ = {y, x, avail, true};
+
+                bool is_self = (!p.login.empty() && cs->login == p.login);
+                int  cp      = is_self ? CP_WARN : CP_SUCCESS;
+                attron(COLOR_PAIR(cp) | A_BOLD);
+                mvaddstr(y, x, is_self ? "★" : "●");
+                if (cell_w >= 4) mvprint_clip(y, x + 1, "@" + cs->login, cell_w - 1);
+                attroff(COLOR_PAIR(cp) | A_BOLD);
+            } else {
+                attron(COLOR_PAIR(CP_DIM));
+                mvprint_clip(y, x, "·", avail);
+                attroff(COLOR_PAIR(CP_DIM));
+            }
+        }
+    }
+}
+
+void Renderer::draw_cluster_tooltip(
+        const Profile& p,
+        const std::unordered_map<std::string, ClusterProfileEntry>& profiles,
+        int top, int bottom, int panel_w) {
+    if (minimap_hover_ < 0 || !minimap_hover_box_.valid) return;
+
+    int room = minimap_hover_ / cluster_layout::CELLS;
+    int desk = minimap_hover_ % cluster_layout::CELLS;
+    int rr   = cluster_layout::row_of(desk);
+    int ss   = cluster_layout::seat_of(desk);
+    if (room < 0 || room >= 4) return;
+
+    const ClusterStudent* cs = get_student_at_desk(p.cluster_students, room, rr, ss);
+    if (!cs) return;
+
+    const ClusterProfileEntry* entry = nullptr;
+    auto it = profiles.find(cs->login);
+    if (it != profiles.end()) entry = &it->second;
+
+    std::vector<std::pair<std::string, std::string>> rows;
+    rows.push_back({"Student", cs->full_name.empty() ? "(loading…)" : cs->full_name});
+    rows.push_back({"Workstation", cs->host + "  (C" + std::to_string(room + 1) +
+                    " R" + std::to_string(rr + 1) + " S" + std::to_string(ss + 1) + ")"});
+    rows.push_back({"Active since", format_active_since(cs->begin_at)});
+    rows.push_back({"Presence", "● ONLINE"});
+
+    if (entry && entry->loaded) {
+        const Profile& up = entry->profile;
+        if (!up.level.empty())
+            rows.push_back({"Cursus level", up.level});
+        if (!up.wallet.empty())
+            rows.push_back({"Wallet", up.wallet + " \xE2\x82\xB3"});
+        if (!up.correction_points.empty())
+            rows.push_back({"Eval points", up.correction_points + " pts"});
+        int done = 0, prog = 0;
+        for (const auto& pr : up.projects) {
+            if (pr.status == "finished" && pr.grade != "N/A" && !pr.grade.empty()) ++done;
+            else if (pr.status == "in_progress") ++prog;
+        }
+        rows.push_back({"Projects", std::to_string(done) + " validated · " +
+                        std::to_string(prog) + " in progress"});
+    } else if (entry && entry->loading) {
+        rows.push_back({"Profile", "⟳ Fetching from intra…"});
+    } else {
+        rows.push_back({"Profile", "Click to load full profile"});
+    }
+
+    const auto& bc = get_border_chars();
+
+    int bx = panel_w + 2;
+    int bw = cols_ - bx - 2;
+    if (bw > 50) bw = 50;
+    if (bw < 30) {
+        bw = std::min(cols_ - 4, 50);
+        bx = (cols_ - bw) / 2;
+    }
+    if (bw < 24 || bx < 0) return;
+
+    int bh = (int)rows.size() + 3; // top border + rows + footer + bottom border
+    int by = minimap_hover_box_.y - 1;
+    if (by < top) by = top;
+    if (by + bh > bottom) by = bottom - bh;
+    if (by < top) by = top;
+
+    attron(COLOR_PAIR(CP_MODAL_BG));
+    for (int r = by; r <= by + bh; ++r) fill_row(r, bx, bw);
+    attroff(COLOR_PAIR(CP_MODAL_BG));
+
+    attron(COLOR_PAIR(CP_BORDER) | A_BOLD);
+    mvaddstr(by, bx, bc.tl);
+    hline_box(by, bx + 1, bw - 2);
+    mvaddstr(by, bx + bw - 1, bc.tr);
+    for (int r = by + 1; r < by + bh; ++r) {
+        mvaddstr(r, bx, bc.v);
+        mvaddstr(r, bx + bw - 1, bc.v);
+    }
+    mvaddstr(by + bh, bx, bc.bl);
+    hline_box(by + bh, bx + 1, bw - 2);
+    mvaddstr(by + bh, bx + bw - 1, bc.br);
+    attroff(COLOR_PAIR(CP_BORDER) | A_BOLD);
+
+    std::string title = " LIVE WORKSTATION INSPECTOR · @" + cs->login + " ";
+    attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    mvprint_clip(by, bx + 2, title, bw - 4);
+    attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+
+    for (size_t i = 0; i < rows.size(); ++i) {
+        int ry = by + 1 + (int)i;
+        attron(COLOR_PAIR(CP_LABEL));
+        mvprint_clip(ry, bx + 2, rows[i].first, 13);
+        attroff(COLOR_PAIR(CP_LABEL));
+
+        bool success = (rows[i].first == "Presence");
+        attron(COLOR_PAIR(success ? CP_SUCCESS : CP_VALUE) | (success ? A_BOLD : 0));
+        mvprint_clip(ry, bx + 15, rows[i].second, bw - 17);
+        attroff(COLOR_PAIR(success ? CP_SUCCESS : CP_VALUE) | (success ? A_BOLD : 0));
+    }
+
+    attron(COLOR_PAIR(CP_DIM));
+    mvprint_clip(by + bh - 1, bx + 2, "[click] Fetch intra profile  ·  [r] Refresh",
+                 bw - 4);
+    attroff(COLOR_PAIR(CP_DIM));
 }

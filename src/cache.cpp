@@ -44,6 +44,10 @@ std::string images_dir() {
     return cache_dir() + "/images";
 }
 
+static std::string profiles_dir() {
+    return cache_dir() + "/profiles";
+}
+
 static std::string profile_cache_path() {
     return cache_dir() + "/profile.json";
 }
@@ -532,6 +536,99 @@ bool profile_cache_exists() {
 
 void purge_profile() {
     std::remove(profile_cache_path().c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cluster student profile cache API
+// ─────────────────────────────────────────────────────────────────────────────
+static std::string cluster_profile_path(const std::string& login) {
+    std::string safe;
+    safe.reserve(login.size());
+    for (char c : login) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_') {
+            safe += c;
+        }
+    }
+    if (safe.empty()) safe = "unknown";
+    return profiles_dir() + "/" + safe + ".json";
+}
+
+bool save_cluster_profile(const std::string& login, const Profile& p) {
+    if (login.empty()) return false;
+    mkdir_p(profiles_dir(), 0700);
+
+    const std::string path = cluster_profile_path(login);
+    const std::string tmp  = path + ".tmp";
+
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return false;
+    out << serialize_profile(p);
+    out.close();
+    if (!out) { std::remove(tmp.c_str()); return false; }
+
+    chmod(tmp.c_str(), S_IRUSR | S_IWUSR);
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool load_cluster_profile(const std::string& login, Profile& out) {
+    if (login.empty()) return false;
+    std::ifstream in(cluster_profile_path(login), std::ios::binary);
+    if (!in.is_open()) return false;
+
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string txt = ss.str();
+    if (txt.size() < 3) return false;
+
+    JVal root;
+    if (!parse_json(txt, root) || root.t != JVal::Obj) return false;
+
+    try {
+        load_profile_from(root, out);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+int load_all_cluster_profiles(std::unordered_map<std::string, Profile>& out) {
+    DIR* d = opendir(profiles_dir().c_str());
+    if (!d) return 0;
+
+    int count = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        const std::string name = ent->d_name;
+        if (name.size() < 6 || name.substr(name.size() - 5) != ".json") continue;
+
+        std::ifstream in(profiles_dir() + "/" + name, std::ios::binary);
+        if (!in.is_open()) continue;
+
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        const std::string txt = ss.str();
+        if (txt.size() < 3) continue;
+
+        JVal root;
+        if (!parse_json(txt, root) || root.t != JVal::Obj) continue;
+
+        Profile p;
+        try {
+            load_profile_from(root, p);
+        } catch (...) {
+            continue;
+        }
+        if (p.login.empty()) continue;
+        out[p.login] = std::move(p);
+        ++count;
+    }
+    closedir(d);
+    return count;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
