@@ -27,6 +27,10 @@ static constexpr const char* UA =
 
 namespace network {
 
+// ─── libcurl global lifecycle ─────────────────────────────────────────────────
+void global_init()    { curl_global_init(CURL_GLOBAL_DEFAULT); }
+void global_cleanup() { curl_global_cleanup(); }
+
 static void mkdir_p_file(const std::string& path) {
     size_t pos = path.find_last_of('/');
     if (pos == std::string::npos) return;
@@ -363,14 +367,18 @@ bool do_login(const std::string& username,
     curl_easy_setopt(c2, CURLOPT_POSTFIELDS,     post_fields.c_str());
     curl_easy_setopt(c2, CURLOPT_REFERER,        keycloak_effective_url.c_str());
     curl_easy_setopt(c2, CURLOPT_HTTPHEADER,     post_hdrs);
-    curl_easy_setopt(c2, CURLOPT_FOLLOWLOCATION, 0L);
+    // Let libcurl follow the whole Keycloak chain on its own:
+    //   POST credentials → 302 callback → profile.intra.42.fr
+    // Relying on CURLINFO_REDIRECT_URL + substring matching proved fragile:
+    // an unexpected/relative Location made a valid login look like a 302 error.
+    curl_easy_setopt(c2, CURLOPT_FOLLOWLOCATION, 1L);
 
     CURLcode post_res = curl_easy_perform(c2);
     long http_code = 0;
     curl_easy_getinfo(c2, CURLINFO_RESPONSE_CODE, &http_code);
-    char* redir_ptr = nullptr;
-    curl_easy_getinfo(c2, CURLINFO_REDIRECT_URL, &redir_ptr);
-    std::string redirect_url = redir_ptr ? redir_ptr : "";
+    char* eff2_ptr = nullptr;
+    curl_easy_getinfo(c2, CURLINFO_EFFECTIVE_URL, &eff2_ptr);
+    std::string final_url = eff2_ptr ? eff2_ptr : "";
 
     curl_slist_free_all(post_hdrs);
     curl_easy_cleanup(c2);
@@ -381,41 +389,23 @@ bool do_login(const std::string& username,
         return false;
     }
 
-    if (http_code == 302 || http_code == 301 || http_code == 303 || http_code == 307) {
-        if (redirect_url.find("profile.intra.42.fr") != std::string::npos ||
-            redirect_url.find("keycloak_student/callback") != std::string::npos)
-        {
-            std::string cb_body;
-            CURL* c3 = make_curl(cookie_file, cb_body);
-            if (!c3) {
-                error_out = "Curl callback failed";
-                return false;
-            }
+    const bool on_profile =
+        http_code == 200 &&
+        final_url.find("profile.intra.42.fr") != std::string::npos &&
+        final_url.find("auth.42.fr") == std::string::npos;
 
-            curl_easy_setopt(c3, CURLOPT_URL,            redirect_url.c_str());
-            curl_easy_setopt(c3, CURLOPT_REFERER,        "https://auth.42.fr/");
-            curl_easy_setopt(c3, CURLOPT_FOLLOWLOCATION, 1L);
+    if (on_profile) {
+        ensure_classic_profile(cookie_file);
+        return true;
+    }
 
-            CURLcode res3 = curl_easy_perform(c3);
-            char* eff3_ptr = nullptr;
-            curl_easy_getinfo(c3, CURLINFO_EFFECTIVE_URL, &eff3_ptr);
-            long code3 = 0;
-            curl_easy_getinfo(c3, CURLINFO_RESPONSE_CODE, &code3);
-            std::string final_eff = eff3_ptr ? eff3_ptr : "";
-            curl_easy_cleanup(c3);
-            secure_cookie_file(cookie_file);
-
-            if (res3 == CURLE_OK && code3 == 200 &&
-                final_eff.find("profile.intra.42.fr") != std::string::npos &&
-                final_eff.find("auth.42.fr") == std::string::npos)
-            {
-                ensure_classic_profile(cookie_file);
-                return true;
-            }
-        } else if (redirect_url.find("auth.42.fr") != std::string::npos) {
-            error_out = "Keycloak requires 2FA or OTP. Please use Cookie Login.";
-            return false;
-        }
+    // Still on the identity provider: a required action / 2FA gate, or a bad
+    // credential response rendered by Keycloak.
+    if (final_url.find("auth.42.fr") != std::string::npos) {
+        error_out = extract_keycloak_error(post_body);
+        if (error_out.empty())
+            error_out = "Keycloak requires 2FA/OTP. Please use Cookie Login.";
+        return false;
     }
 
     error_out = extract_keycloak_error(post_body);

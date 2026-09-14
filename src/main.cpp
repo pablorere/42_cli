@@ -34,6 +34,8 @@ static void print_help(const char* prog) {
               << "  --list-themes            List all 10 available themes and exit\n"
               << "  -c, --config <file>      Path to custom config.ini\n"
               << "  -k, --cookie <file>      Path to cookies.txt\n"
+              << "  --login <login>          Headless credential login; pair with --password\n"
+              << "  --password <password>    Password for --login (prints result and exits)\n"
               << "  -h, --help               Show this help message and exit\n\n"
               << "Navigation & Keybindings:\n"
               << "  h, j, k, l               Vim movement across tabs, trees, and lists\n"
@@ -74,6 +76,8 @@ int main(int argc, char* argv[]) {
     Config::get().apply_env_overrides();
 
     // 2. Parse CLI arguments
+    std::string cli_user;
+    std::string cli_pass;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -93,10 +97,48 @@ int main(int argc, char* argv[]) {
             Config::get().load(config_path);
         } else if ((arg == "-k" || arg == "--cookie") && i + 1 < argc) {
             Config::get().cookie_path = argv[++i];
+        } else if (arg == "--login" && i + 1 < argc) {
+            cli_user = argv[++i];
+        } else if (arg == "--password" && i + 1 < argc) {
+            cli_pass = argv[++i];
         }
     }
 
+    // 2b. Headless credential login (testing / scripting helper).
+    if (!cli_user.empty() || !cli_pass.empty()) {
+        if (cli_user.empty() || cli_pass.empty()) {
+            std::cerr << "error: --login and --password must be used together\n";
+            return 2;
+        }
+        network::global_init();
+
+        const std::string cookie = network::cookie_file_path();
+        std::string login_err;
+        if (!network::do_login(cli_user, cli_pass, cookie, login_err)) {
+            std::cerr << "login failed: " << login_err << "\n";
+            network::global_cleanup();
+            return 1;
+        }
+
+        Profile prof;
+        std::string prof_err;
+        if (!network::fetch_profile(cookie, prof, prof_err)) {
+            std::cerr << "logged in, but profile fetch failed: " << prof_err << "\n";
+            network::global_cleanup();
+            return 1;
+        }
+
+        std::cout << "logged in as @" << prof.login;
+        if (!prof.display_name.empty() && prof.display_name != prof.login)
+            std::cout << " (" << prof.display_name << ")";
+        std::cout << "\n";
+        network::global_cleanup();
+        return 0;
+    }
+
     std::signal(SIGINT, handle_sigint);
+
+    network::global_init();
 
     SharedState    state;
     NetworkWorker  worker(state);
@@ -1083,5 +1125,6 @@ int main(int argc, char* argv[]) {
 
     image_renderer::clear_kitty_images();
     worker.stop();
+    network::global_cleanup();
     return 0;
 }

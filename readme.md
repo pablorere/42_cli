@@ -55,6 +55,8 @@ Options:
   --list-themes            List available themes and exit
   -c, --config <file>      Path to custom config.ini
   -k, --cookie <file>      Path to cookies.txt
+  --login <login>          Headless credential login; pair with --password
+  --password <password>    Password for --login (prints result and exits)
   -h, --help               Show help and exit
 ```
 
