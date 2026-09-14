@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>42_cli Dashboard — Remodel (no submenu)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+  body { font-family: 'Inter', 'JetBrains Mono', monospace; background: #0a0a0a; color: #e0e0e0; }
+  .term-box { border: 1px solid #333; background: #111; font-family: 'JetBrains Mono', monospace; }
+  .term-bar { background: #1a1a2e; border-bottom: 2px solid #16213e; }
+  .term-status { background: #0f0f23; border-top: 1px solid #1a1a2e; }
+  .accent { color: #e94560; }
+  .card { border: 1px solid #2a2a3e; background: #12121c; }
+  .row { transition: background 0.12s; cursor: pointer; border-left: 3px solid transparent; }
+  .row:hover { background: rgba(233,69,96,0.07); border-left-color: #e94560; }
+  .pill-pass { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
+  .pill-prog { background: rgba(234,179,8,0.15); color: #facc15; border: 1px solid rgba(234,179,8,0.4); }
+  .pill-fail { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
+  .progress-fill { transition: width 0.5s ease; }
+  .btn { transition: all 0.12s; cursor: pointer; }
+  .btn:hover { filter: brightness(1.2); box-shadow: 0 0 12px rgba(233,69,96,0.35); }
+  .scroll-area { scrollbar-width: thin; scrollbar-color: #2a2a3e transparent; }
+</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+<div class="w-full max-w-5xl space-y-6">
+
+  <div class="text-center space-y-2">
+    <h1 class="text-3xl font-bold accent tracking-wider">42_cli Dashboard — Remodel (no submenu)</h1>
+    <p class="text-gray-500 text-sm">One flat, scrollable dashboard · summary strip · status pills · clickable action center · i18n · hover</p>
+  </div>
+
+  <!-- What changed -->
+  <div class="term-box rounded-lg p-4 space-y-2">
+    <h2 class="text-lg font-bold accent mb-3">What changed</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Submenu removed</strong> — Overview / Scale Teams / Points &amp; Pool collapsed into one flat view (j/k or wheel scrolls)</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Summary strip</strong> — 6 stats always visible at the top</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Unified card language</strong> — title-bar + body cards, consistent with the Slot Manager</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Status pills</strong> — PASS / IN PROGRESS / FAIL as text+border (never colour-only)</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Clickable [Review] button</strong> — action center is a real button</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Hover + i18n + glyphs</strong> — row hover highlight, all strings via i18n, emoji → glyphs</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Remodeled minimap</strong> — clickable room pills (C1–C4), online badge, legend (● online · ★ you · · empty)</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Remodeled hover inspector</strong> — i18n labels, avatar photo, cleaner rows</span></div>
+    </div>
+  </div>
+
+  <!-- Terminal preview -->
+  <div class="term-box rounded-lg overflow-hidden">
+    <div class="term-bar px-4 py-2 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="w-3 h-3 rounded-full bg-red-500"></span>
+        <span class="w-3 h-3 rounded-full bg-yellow-500"></span>
+        <span class="w-3 h-3 rounded-full bg-green-500"></span>
+        <span class="ml-3 text-gray-400 text-xs">42_cli — Dashboard</span>
+      </div>
+      <span class="text-gray-500 text-xs">⟳ Synced</span>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="bg-[#1a1a2e] px-2 py-1 flex gap-1 border-b border-[#16213e]">
+      <button class="px-3 py-1 rounded text-xs font-semibold bg-[#e94560] text-white">1 Dashboard</button>
+      <button class="px-3 py-1 rounded text-xs font-semibold text-gray-400">2 Roadmap</button>
+      <button class="px-3 py-1 rounded text-xs font-semibold text-gray-400">3 Slots</button>
+      <button class="px-3 py-1 rounded text-xs font-semibold text-gray-400">4 Cluster</button>
+      <div class="ml-auto text-gray-600 text-xs self-center">[ / search ]</div>
+    </div>
+
+    <div class="flex" style="height: 500px;">
+      <!-- Left: student card + minimap -->
+      <div class="w-1/3 bg-[#0d0d1a] border-r border-[#1a1a2e] flex flex-col p-3 gap-3">
+        <div class="term-box rounded p-3 space-y-2 flex-1">
+          <div class="text-center">
+            <div class="text-xs font-bold accent mb-2 tracking-wider">STUDENT CARD</div>
+            <div class="w-16 h-16 mx-auto rounded-full bg-[#1a1a2e] border-2 accent flex items-center justify-center mb-2">👤</div>
+            <div class="accent font-bold text-sm">@paulasuzuki</div>
+            <div class="text-gray-500 text-xs">Pablo Renato S.</div>
+          </div>
+          <div class="border-t border-[#1a1a2e] pt-2 space-y-1 text-xs">
+            <div class="flex justify-between"><span class="text-gray-500">Level</span><span class="text-green-500 font-bold">12.42</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Wallet</span><span class="text-yellow-500 font-bold">342 ₳</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Eval points</span><span class="text-green-500 font-bold">12</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Seat</span><span class="text-green-500 font-bold">● e1r1p1</span></div>
+          </div>
+        </div>
+        <div class="term-box rounded p-3 text-[10px] relative" style="min-height: 130px;">
+          <div class="flex items-center gap-1 mb-1">
+            <span class="accent font-bold tracking-wider">◆ CLUSTER</span>
+            <div class="flex gap-1 ml-auto">
+              <button class="room-pill active px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#e94560] text-white" data-room="0">C1</button>
+              <button class="room-pill px-1.5 py-0.5 rounded text-[9px] font-bold text-gray-400" data-room="1">C2</button>
+              <button class="room-pill px-1.5 py-0.5 rounded text-[9px] font-bold text-gray-400" data-room="2">C3</button>
+              <button class="room-pill px-1.5 py-0.5 rounded text-[9px] font-bold text-gray-400" data-room="3">C4</button>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="pill-prog text-[9px] px-1.5 py-0.5 rounded-full font-bold">4 ONLINE</span>
+            <span class="text-gray-500 text-[9px]">c1r2s1 · your seat</span>
+          </div>
+          <div class="grid grid-cols-7 gap-0 text-center text-[9px] text-gray-500">
+            <div>DSK</div><div>S1</div><div>S2</div><div>S3</div><div>S4</div><div>S5</div><div>S6</div>
+          </div>
+          <div class="space-y-1 mt-1">
+            <div class="flex gap-px text-center text-[9px]">
+              <span class="text-gray-600 w-5">R1</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-red-500 rounded" data-login="paulasuzuki" data-seat="C1 R1 S1" data-name="Pablo Renato S." data-since="2h">★</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-green-500 rounded" data-login="peer1" data-seat="C1 R1 S2" data-name="Marie Dupont" data-since="1h">●</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-green-500 rounded" data-login="peer2" data-seat="C1 R1 S3" data-name="John Lee" data-since="3h">●</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-yellow-500 rounded" data-login="peer3" data-seat="C1 R1 S4" data-name="Ana Ruiz" data-since="30m">●</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-green-500 rounded" data-login="peer4" data-seat="C1 R1 S5" data-name="Kim Park" data-since="5h">●</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-green-500 rounded" data-login="peer5" data-seat="C1 R1 S6" data-name="Leo Chen" data-since="20m">●</span>
+            </div>
+            <div class="flex gap-px text-center text-[9px]">
+              <span class="text-gray-600 w-5">R2</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-green-500 rounded" data-login="peer6" data-seat="C1 R2 S1" data-name="Sara Diaz" data-since="4h">●</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-red-500 rounded" data-login="peer7" data-seat="C1 R2 S2" data-name="Tom White" data-since="2h">★</span>
+              <span class="flex-1 bg-[#1a1a2e] rounded text-gray-600">·</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-yellow-500 rounded" data-login="peer8" data-seat="C1 R2 S4" data-name="Mia Wong" data-since="1h">●</span>
+              <span class="flex-1 bg-[#1a1a2e] rounded text-gray-600">·</span>
+              <span class="cell flex-1 bg-[#1a1a2e] border border-green-500 rounded" data-login="peer9" data-seat="C1 R2 S6" data-name="Noah Kim" data-since="6h">●</span>
+            </div>
+          </div>
+          <div class="flex gap-2 text-[9px] text-gray-600 mt-1.5 justify-center">
+            <span class="text-green-500">● online</span>
+            <span class="accent">★ you</span>
+            <span class="text-gray-600">· empty</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: single flat dashboard (scrollable) -->
+      <div class="flex-1 bg-[#0d0d1a] flex flex-col p-3 gap-2 overflow-hidden">
+        <div class="flex items-center gap-3">
+          <span class="accent font-bold tracking-wider">◆ DASHBOARD</span>
+          <span class="ml-auto pill-prog text-[10px] px-2 py-0.5 rounded-full font-bold">⚠ 2 PENDING</span>
+        </div>
+
+        <!-- summary strip -->
+        <div class="grid grid-cols-6 gap-1.5 text-center">
+          <div class="bg-[#1a1a2e] rounded p-1.5"><div class="text-gray-500 text-[9px]">Level</div><div class="text-green-500 font-bold text-sm">12.42</div></div>
+          <div class="bg-[#1a1a2e] rounded p-1.5"><div class="text-gray-500 text-[9px]">Wallet</div><div class="text-yellow-500 font-bold text-sm">342₳</div></div>
+          <div class="bg-[#1a1a2e] rounded p-1.5"><div class="text-gray-500 text-[9px]">Eval</div><div class="text-green-500 font-bold text-sm">12</div></div>
+          <div class="bg-[#1a1a2e] rounded p-1.5"><div class="text-gray-500 text-[9px]">Seat</div><div class="text-white font-bold text-sm">e1r1p1</div></div>
+          <div class="bg-[#1a1a2e] rounded p-1.5"><div class="text-gray-500 text-[9px]">Slots</div><div class="text-white font-bold text-sm">3</div></div>
+          <div class="bg-[#1a1a2e] rounded p-1.5 cursor-pointer btn" data-review="1"><div class="text-gray-500 text-[9px]">Pending</div><div class="accent font-bold text-sm">2 ⚠</div></div>
+        </div>
+
+        <!-- scrollable content -->
+        <div class="scroll-area flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
+          <div class="card rounded p-2.5">
+            <div class="accent font-bold text-xs mb-1.5 tracking-wider">◆ 42 CURSUS LEVEL</div>
+            <div class="flex items-center gap-3">
+              <span class="text-2xl font-bold text-white">12.42</span>
+              <div class="flex-1 bg-[#1a1a2e] rounded-full h-3">
+                <div class="progress-fill bg-gradient-to-r from-[#e94560] to-pink-500 h-3 rounded-full" style="width: 62%"></div>
+              </div>
+              <span class="accent font-bold">62%</span>
+            </div>
+          </div>
+
+          <div class="card rounded p-2.5 border-l-2" style="border-left-color:#facc15;">
+            <div class="flex items-center gap-2">
+              <span class="text-yellow-400 font-bold text-xs tracking-wider">⚠ ACTION REQUIRED</span>
+              <span class="text-xs text-gray-400 flex-1">2 evaluations awaiting your response</span>
+              <button class="btn bg-[#e94560] text-white text-xs font-bold px-3 py-1 rounded" data-review="1">Review →</button>
+            </div>
+          </div>
+
+          <div class="card rounded p-2.5">
+            <div class="accent font-bold text-xs mb-1.5 tracking-wider">◆ RECENT SUBMISSIONS</div>
+            <div class="text-[10px] bg-[#16213e] text-gray-400 px-2 py-0.5 font-bold mb-1">#  PROJECT        GRADE   STATUS</div>
+            <div class="row px-2 py-1 text-xs"><span class="text-gray-600">01</span> <span class="text-white font-semibold">libft</span> <span class="ml-auto text-green-500 font-bold">100</span> <span class="pill-pass text-[9px] px-2 py-0.5 rounded-full font-bold ml-2">PASS</span></div>
+            <div class="row px-2 py-1 text-xs"><span class="text-gray-600">02</span> <span class="text-white font-semibold">ft_printf</span> <span class="ml-auto text-green-500 font-bold">85</span> <span class="pill-pass text-[9px] px-2 py-0.5 rounded-full font-bold ml-2">PASS</span></div>
+            <div class="row px-2 py-1 text-xs"><span class="text-gray-600">03</span> <span class="text-white font-semibold">get_next_line</span> <span class="ml-auto text-gray-400 font-bold">N/A</span> <span class="pill-prog text-[9px] px-2 py-0.5 rounded-full font-bold ml-2">IN PROGRESS</span></div>
+          </div>
+
+          <div class="card rounded p-2.5">
+            <div class="accent font-bold text-xs mb-1.5 tracking-wider">◆ RECENT EVALUATIONS</div>
+            <div class="text-[10px] bg-[#16213e] text-gray-400 px-2 py-0.5 font-bold mb-1">#   PROJECT       PEER     GRADE   FEEDBACK</div>
+            <div class="row px-2 py-1 text-xs"><span class="text-gray-600">01</span> <span class="text-white font-semibold">libft</span> <span class="text-gray-400">@peer1</span> <span class="ml-auto text-green-500 font-bold">100</span> <span class="text-yellow-400">★★★★★</span></div>
+            <div class="row px-2 py-1 text-xs"><span class="text-gray-600">02</span> <span class="text-white font-semibold">ft_printf</span> <span class="text-gray-400">@peer2</span> <span class="ml-auto text-yellow-500 font-bold">85</span> <span class="text-yellow-400">★★★★☆</span></div>
+          </div>
+
+          <div class="card rounded p-2.5">
+            <div class="accent font-bold text-xs mb-1.5 tracking-wider">◆ EVALUATION ECONOMY</div>
+            <div class="grid grid-cols-3 gap-2 text-center">
+              <div><div class="text-gray-500 text-[10px]">Available</div><div class="accent font-bold text-lg">12 pts</div></div>
+              <div><div class="text-gray-500 text-[10px]">Wallet</div><div class="text-yellow-500 font-bold text-lg">342 ₳</div></div>
+              <div><div class="text-gray-500 text-[10px]">Can request</div><div class="text-green-500 font-bold text-lg">12 evals</div></div>
+            </div>
+            <ul class="text-xs text-gray-500 space-y-0.5 mt-2">
+              <li><span class="text-green-500 font-bold">●</span> +1 pt per evaluation given · <span class="text-red-400 font-bold">●</span> -1 pt per submission</li>
+              <li><span class="text-gray-500">●</span> Tip: open slots 14:00–18:00 for fastest matches</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="text-[10px] text-gray-600 flex justify-between border-t border-[#1a1a2e] pt-1.5">
+          <span>j/k:scroll · Enter/f:inspect · r:sync · t:theme · q:quit</span>
+          <span class="text-gray-500">wheel:scroll · hover:highlight · minimap:tooltip</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- status bar -->
+    <div class="term-status px-4 py-1 flex justify-between text-[10px]">
+      <span class="accent font-bold">@paulasuzuki</span>
+      <span class="text-gray-500">ℹ 2 feedbacks pending · 3 slots open</span>
+      <span class="text-gray-400">j/k:scroll · Enter/f:inspect · r:sync · t:theme · q:quit</span>
+    </div>
+  </div>
+
+  <!-- keybindings -->
+  <div class="term-box rounded-lg p-4 space-y-3">
+    <h2 class="text-lg font-bold accent">Keybindings + Mouse</h2>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">j / k</span><br><span class="text-gray-500">Scroll dashboard</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">Enter / f</span><br><span class="text-gray-500">Inspect feedback</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">r</span><br><span class="text-gray-500">Sync data</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">t / q</span><br><span class="text-gray-500">Theme / quit</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">wheel</span><br><span class="text-gray-500">Scroll dashboard</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">hover</span><br><span class="text-gray-500">Rows + minimap tooltip</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">click</span><br><span class="text-gray-500">Review / minimap</span></div>
+    </div>
+  </div>
+
+  <!-- invariants -->
+  <div class="bg-[#1a1a2e] rounded-lg p-4 border border-[#333]">
+    <h2 class="text-lg font-bold accent mb-2">Design invariants preserved</h2>
+    <ul class="text-sm text-gray-400 space-y-1">
+      <li>• <strong class="text-white">Esc</strong> closes innermost layer first (inspector → menu)</li>
+      <li>• <strong class="text-white">h/j/k/l</strong> + arrows work in every view</li>
+      <li>• <strong class="text-white">KEY_RESIZE / SIGWINCH</strong> recompute — no hardcoded widths</li>
+      <li>• <strong class="text-white">No colour-only signals</strong> — status pills are text+border</li>
+      <li>• <strong class="text-white">i18n</strong> — all strings via i18n::tr()</li>
+      <li>• <strong class="text-white">Render-then-paint</strong> — hitboxes built during draw</li>
+    </ul>
+  </div>
+</div>
+
+<!-- hover tooltip -->
+<div id="tooltip" class="ctx-menu" style="position:fixed; display:none; max-width:220px;">
+  <div class="accent font-bold text-xs mb-1" id="tt-title">@login</div>
+  <div class="text-gray-400 text-xs mb-1" id="tt-name">Name</div>
+  <div class="text-gray-500 text-[11px]" id="tt-seat">seat</div>
+  <div class="text-green-500 text-[11px] font-bold mt-1">● ONLINE · <span id="tt-since">2h</span></div>
+</div>
+
+<script>
+  document.querySelectorAll('[data-review]').forEach(b => {
+    b.addEventListener('click', () => alert('Open the evaluation feedback inspector'));
+  });
+
+  // Room pills
+  document.querySelectorAll('.room-pill').forEach(p => {
+    p.addEventListener('click', () => {
+      document.querySelectorAll('.room-pill').forEach(x => {
+        x.classList.remove('active', 'bg-[#e94560]', 'text-white');
+        x.classList.add('text-gray-400');
+      });
+      p.classList.add('active', 'bg-[#e94560]', 'text-white');
+      p.classList.remove('text-gray-400');
+    });
+  });
+
+  // Minimap hover tooltip
+  const tt = document.getElementById('tooltip');
+  document.querySelectorAll('.cell').forEach(c => {
+    c.addEventListener('mousemove', (e) => {
+      document.getElementById('tt-title').textContent = '@' + c.dataset.login;
+      document.getElementById('tt-name').textContent = c.dataset.name;
+      document.getElementById('tt-seat').textContent = c.dataset.seat;
+      document.getElementById('tt-since').textContent = c.dataset.since;
+      tt.style.display = 'block';
+      tt.style.left = Math.min(e.clientX + 14, window.innerWidth - 230) + 'px';
+      tt.style.top = (e.clientY + 10) + 'px';
+    });
+    c.addEventListener('mouseleave', () => tt.style.display = 'none');
+    c.addEventListener('click', () => alert('Open profile: @' + c.dataset.login));
+  });
+</script>
+</body>
+</html>

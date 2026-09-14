@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>42_cli Slot Manager — Redesign + Mouse Controls</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+  body { font-family: 'Inter', 'JetBrains Mono', monospace; background: #0a0a0a; color: #e0e0e0; }
+  .term-box { border: 1px solid #333; background: #111; font-family: 'JetBrains Mono', monospace; }
+  .term-bar { background: #1a1a2e; border-bottom: 2px solid #16213e; }
+  .term-status { background: #0f0f23; border-top: 1px solid #1a1a2e; }
+  .accent { color: #e94560; }
+  .slot-row { transition: background 0.12s; cursor: pointer; border-left: 3px solid transparent; }
+  .slot-row:hover { background: rgba(233,69,96,0.07); }
+  .slot-row.selected { background: rgba(233,69,96,0.14); border-left-color: #e94560; }
+  .btn { transition: all 0.12s; cursor: pointer; user-select: none; }
+  .btn:hover { filter: brightness(1.2); }
+  .btn.primary:hover { box-shadow: 0 0 12px rgba(233,69,96,0.35); }
+  .btn.danger:hover { box-shadow: 0 0 12px rgba(239,68,68,0.4); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; filter: none; box-shadow: none; }
+  .pill-available { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.4); }
+  .pill-reserved  { background: rgba(234,179,8,0.15); color: #facc15; border: 1px solid rgba(234,179,8,0.4); }
+  .ctx-menu { position: absolute; z-index: 50; background: #1a1a2e; border: 1px solid #333; border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,0.6); overflow: hidden; }
+  .ctx-item { padding: 6px 14px; font-size: 12px; cursor: pointer; transition: background 0.1s; }
+  .ctx-item:hover { background: #e94560; color: #fff; }
+  .ctx-item.danger:hover { background: #ef4444; }
+</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+<div class="w-full max-w-5xl space-y-6">
+
+  <!-- Header -->
+  <div class="text-center space-y-2">
+    <h1 class="text-3xl font-bold accent tracking-wider">42_cli Slot Manager — Redesign + Mouse Controls</h1>
+    <p class="text-gray-500 text-sm">Clickable toolbar · hover feedback · right-click context menu · summary strip · i18n strings</p>
+  </div>
+
+  <!-- What Changed -->
+  <div class="term-box rounded-lg p-4 space-y-2">
+    <h2 class="text-lg font-bold accent mb-3">What changed</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Clickable toolbar</strong> — [+ New slot] / [-15m trim] / [Delete] buttons with primary + danger styling and disabled states</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Hover feedback</strong> — rows and buttons highlight on mouse motion (no more click-to-see)</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Right-click context menu</strong> — Copy ID / Trim -15m / Delete per slot</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Summary strip</strong> — open slots · total hours · next window · safety offset at a glance</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Status pill</strong> — AVAILABLE / RESERVED as text+border (not color-only), paired with a shape</span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">i18n strings</strong> — replaces hardcoded Spanish in <code>draw_slots()</code></span></div>
+      <div class="flex items-start gap-2 text-gray-400"><span class="accent font-bold">★</span><span><strong class="text-white">Free space between slots</strong> — blank rows separate each card (configurable gap); terminal background shows through</span></div>
+    </div>
+  </div>
+
+  <!-- Slot Manager Preview -->
+  <div class="term-box rounded-lg overflow-hidden">
+    <div class="term-bar px-4 py-2 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="w-3 h-3 rounded-full bg-red-500"></span>
+        <span class="w-3 h-3 rounded-full bg-yellow-500"></span>
+        <span class="w-3 h-3 rounded-full bg-green-500"></span>
+        <span class="ml-3 text-gray-400 text-xs">42_cli — Slot Manager</span>
+      </div>
+      <span class="text-gray-500 text-xs">⟳ Synced</span>
+    </div>
+
+    <!-- Tab Bar -->
+    <div class="bg-[#1a1a2e] px-2 py-1 flex gap-1 border-b border-[#16213e]">
+      <button class="px-3 py-1 rounded text-xs font-semibold text-gray-400">1 Dashboard</button>
+      <button class="px-3 py-1 rounded text-xs font-semibold text-gray-400">2 Roadmap</button>
+      <button class="px-3 py-1 rounded text-xs font-semibold bg-[#e94560] text-white">3 Slots</button>
+      <button class="px-3 py-1 rounded text-xs font-semibold text-gray-400">4 Cluster</button>
+      <div class="ml-auto text-gray-600 text-xs self-center">[ / search ]</div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="flex" style="height: 460px;">
+
+      <!-- Left: shared student card -->
+      <div class="w-1/3 bg-[#0d0d1a] border-r border-[#1a1a2e] flex flex-col p-3 gap-3">
+        <div class="term-box rounded p-3 space-y-2">
+          <div class="text-center">
+            <div class="text-xs font-bold accent mb-2 tracking-wider">STUDENT CARD</div>
+            <div class="w-16 h-16 mx-auto rounded-full bg-[#1a1a2e] border-2 accent flex items-center justify-center mb-2">👤</div>
+            <div class="accent font-bold text-sm">@paulasuzuki</div>
+            <div class="text-gray-500 text-xs">Pablo Renato S.</div>
+          </div>
+          <div class="border-t border-[#1a1a2e] pt-2 space-y-1 text-xs">
+            <div class="flex justify-between"><span class="text-gray-500">Level</span><span class="text-green-500 font-bold">12.42</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Wallet</span><span class="text-yellow-500 font-bold">342 ₳</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Seat</span><span class="text-green-500 font-bold">● e1r1p1</span></div>
+          </div>
+        </div>
+        <div class="text-[10px] text-gray-600 px-1 leading-relaxed">
+          Slots are the windows you open so a peer can book you for an evaluation. Peak hours (14:00–18:00) fill fastest.
+        </div>
+      </div>
+
+      <!-- Right: slot manager -->
+      <div class="flex-1 bg-[#0d0d1a] flex flex-col p-3 gap-2 overflow-hidden relative" id="manager">
+
+        <!-- Header -->
+        <div class="flex items-baseline gap-3">
+          <span class="accent font-bold tracking-wider">◆ SLOT MANAGER</span>
+          <span class="pill-available text-[10px] px-2 py-0.5 rounded-full font-bold">3 OPEN</span>
+        </div>
+        <div class="text-xs text-gray-500 -mt-1">Reserve a window so a peer can evaluate you.</div>
+
+        <!-- Summary strip -->
+        <div class="grid grid-cols-4 gap-2 text-center">
+          <div class="bg-[#1a1a2e] rounded p-2"><div class="text-gray-500 text-[10px]">Open slots</div><div class="text-white font-bold text-sm">3</div></div>
+          <div class="bg-[#1a1a2e] rounded p-2"><div class="text-gray-500 text-[10px]">Total time</div><div class="text-white font-bold text-sm">2h 30m</div></div>
+          <div class="bg-[#1a1a2e] rounded p-2"><div class="text-gray-500 text-[10px]">Next window</div><div class="text-green-500 font-bold text-sm">LUN 14:00</div></div>
+          <div class="bg-[#1a1a2e] rounded p-2 cursor-pointer btn" data-action="gap" title="Set free space between slots"><div class="text-gray-500 text-[10px]">Free space</div><div class="text-yellow-500 font-bold text-sm" id="summarygap">15m</div></div>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="flex gap-2" id="toolbar">
+          <button class="btn primary bg-[#e94560] text-white text-xs font-bold px-3 py-1.5 rounded" data-action="new">+ New slot</button>
+          <button class="btn bg-[#1a1a2e] text-gray-300 border border-[#333] text-xs font-bold px-3 py-1.5 rounded" data-action="trim">-15m trim</button>
+          <button class="btn danger bg-[#1a1a2e] text-red-400 border border-red-900 text-xs font-bold px-3 py-1.5 rounded" data-action="delete">✕ Delete</button>
+          <button class="btn bg-[#1a1a2e] text-yellow-400 border border-[#333] text-xs font-bold px-3 py-1.5 rounded ml-auto" data-action="gap">⏱ Free space: <span id="btngap">15m</span></button>
+        </div>
+
+        <!-- Slot list (free space between cards: space-y-3) -->
+        <div class="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1" id="slotlist">
+          <!-- slot 1 -->
+          <div class="slot-row selected bg-[#111] rounded p-2 flex items-center gap-3" data-id="123456" data-title="Available">
+            <span class="text-green-500 text-sm">◉</span>
+            <span class="pill-available text-[10px] px-2 py-0.5 rounded-full font-bold">AVAILABLE</span>
+            <span class="text-white font-bold text-sm">LUN 14 SEP</span>
+            <span class="text-gray-200 font-semibold text-sm">14:00 → 14:30</span>
+            <span class="text-gray-500 text-xs">30 min</span>
+            <span class="ml-auto text-gray-600 text-[10px]">ID 123456</span>
+            <span class="accent font-bold">▶</span>
+          </div>
+          <!-- slot 2 -->
+          <div class="slot-row bg-[#111] rounded p-2 flex items-center gap-3" data-id="123457" data-title="Available">
+            <span class="text-green-500 text-sm">◉</span>
+            <span class="pill-available text-[10px] px-2 py-0.5 rounded-full font-bold">AVAILABLE</span>
+            <span class="text-white font-bold text-sm">MIE 16 SEP</span>
+            <span class="text-gray-200 font-semibold text-sm">10:30 → 11:00</span>
+            <span class="text-gray-500 text-xs">30 min</span>
+            <span class="ml-auto text-gray-600 text-[10px]">ID 123457</span>
+          </div>
+          <!-- slot 3 -->
+          <div class="slot-row bg-[#111] rounded p-2 flex items-center gap-3" data-id="123455" data-title="Reserved">
+            <span class="text-yellow-500 text-sm">◉</span>
+            <span class="pill-reserved text-[10px] px-2 py-0.5 rounded-full font-bold">RESERVED</span>
+            <span class="text-white font-bold text-sm">MAR 15 SEP</span>
+            <span class="text-gray-200 font-semibold text-sm">16:00 → 16:45</span>
+            <span class="text-gray-500 text-xs">45 min</span>
+            <span class="ml-auto text-gray-600 text-[10px]">ID 123455</span>
+          </div>
+        </div>
+
+        <!-- Context menu (right-click) -->
+        <div class="ctx-menu hidden" id="ctxmenu" style="right: 24px; top: 250px;">
+          <div class="ctx-item" data-act="copy">📋 Copy slot ID</div>
+          <div class="ctx-item" data-act="trim">✂ Trim -15m</div>
+          <div class="ctx-item danger" data-act="delete">🗑 Delete slot</div>
+        </div>
+
+        <!-- Free space picker modal -->
+        <div class="absolute inset-0 hidden items-center justify-center bg-black/60 z-40" id="gapmodal">
+          <div class="term-box rounded-lg w-80 p-4 space-y-3">
+            <div class="accent font-bold text-sm tracking-wider">◆ FREE SPACE BETWEEN SLOTS</div>
+            <div class="text-gray-500 text-xs">Time left empty between consecutive evaluations. The next slot will start only after this gap.</div>
+            <div class="flex items-center justify-center gap-4 py-2">
+              <button class="btn bg-[#1a1a2e] border border-[#333] w-9 h-9 rounded font-bold text-lg" id="gapminus">◀</button>
+              <div class="text-center w-20">
+                <div class="text-3xl font-bold text-white" id="gapvalue">15</div>
+                <div class="text-gray-500 text-[10px]">minutes</div>
+              </div>
+              <button class="btn bg-[#1a1a2e] border border-[#333] w-9 h-9 rounded font-bold text-lg" id="gapplus">▶</button>
+            </div>
+            <div class="text-gray-600 text-[10px] text-center">j / ◀ less · k / ▶ more · step 5 min</div>
+            <div class="flex gap-2 justify-center pt-1">
+              <button class="btn primary bg-[#e94560] text-white text-xs font-bold px-4 py-1.5 rounded" id="gapok">Enter · Confirm</button>
+              <button class="btn bg-[#1a1a2e] text-gray-300 border border-[#333] text-xs px-4 py-1.5 rounded" id="gapcancel">Esc · Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- footer hints -->
+        <div class="text-[10px] text-gray-600 flex justify-between border-t border-[#1a1a2e] pt-1.5">
+          <span>j/k:Select · s:New · d:-15m · D:Delete · right-click:menu</span>
+          <span class="text-gray-500">wheel:scroll · click:select · hover:highlight</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="term-status px-4 py-1 flex justify-between text-[10px]">
+      <span class="accent font-bold">@paulasuzuki</span>
+      <span class="text-gray-500">ℹ 3 slots open · next evaluation LUN 14 SEP 14:00</span>
+      <span class="text-gray-400">j/k:Sel s:New d:-15m D:Del · t:Theme q:Quit</span>
+    </div>
+  </div>
+
+  <!-- Empty state preview -->
+  <div class="term-box rounded-lg overflow-hidden">
+    <div class="term-bar px-4 py-2 flex items-center gap-2">
+      <span class="w-3 h-3 rounded-full bg-red-500"></span>
+      <span class="w-3 h-3 rounded-full bg-yellow-500"></span>
+      <span class="w-3 h-3 rounded-full bg-green-500"></span>
+      <span class="ml-3 text-gray-400 text-xs">Empty state</span>
+    </div>
+    <div class="bg-[#0d0d1a] p-8 flex flex-col items-center gap-3 text-center">
+      <div class="text-4xl">🕒</div>
+      <div class="text-white font-bold">No open slots yet</div>
+      <div class="text-gray-500 text-xs">Open your first slot and peers will be able to book you.<br>A +15m safety offset is applied automatically.</div>
+      <button class="btn primary bg-[#e94560] text-white text-sm font-bold px-5 py-2 rounded mt-1">+ New slot</button>
+      <div class="text-gray-600 text-[10px]">press <span class="text-white">s</span> or click the button</div>
+    </div>
+  </div>
+
+  <!-- Keybindings -->
+  <div class="term-box rounded-lg p-4 space-y-3">
+    <h2 class="text-lg font-bold accent">Keybindings + Mouse</h2>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">j / k</span><br><span class="text-gray-500">Move selection</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">s</span><br><span class="text-gray-500">New slot</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">d</span><br><span class="text-gray-500">Trim -15m</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">D / x</span><br><span class="text-gray-500">Delete slot</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">click</span><br><span class="text-gray-500">Select row / press button</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">hover</span><br><span class="text-gray-500">Highlight row / button</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">wheel</span><br><span class="text-gray-500">Scroll list</span></div>
+      <div class="bg-[#1a1a2e] rounded p-2"><span class="accent font-bold">right-click</span><br><span class="text-gray-500">Context menu</span></div>
+    </div>
+  </div>
+
+  <!-- Design Invariants -->
+  <div class="bg-[#1a1a2e] rounded-lg p-4 border border-[#333]">
+    <h2 class="text-lg font-bold accent mb-2">Design invariants preserved</h2>
+    <ul class="text-sm text-gray-400 space-y-1">
+      <li>• <strong class="text-white">Esc</strong> closes innermost layer first (context menu → modal → main menu)</li>
+      <li>• <strong class="text-white">h/j/k/l</strong> navigation contract unchanged</li>
+      <li>• <strong class="text-white">KEY_RESIZE / SIGWINCH</strong> recompute layout — toolbar collapses, list scrolls, no hardcoded width</li>
+      <li>• <strong class="text-white">No color-only signals</strong> — AVAILABLE/RESERVED are text pills + ◉ shape, not just color</li>
+      <li>• <strong class="text-white">i18n</strong> — all strings go through <code>i18n::tr()</code> (en + es)</li>
+      <li>• <strong class="text-white">Render-then-paint</strong> — button + row hitboxes built during draw</li>
+      <li>• <strong class="text-white">Confirmation</strong> — Delete still requires explicit confirm (no silent data loss)</li>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+  const slotlist = document.getElementById('slotlist');
+  const toolbar  = document.getElementById('toolbar');
+  const ctxmenu  = document.getElementById('ctxmenu');
+  let selected = null;
+  let gap = 15;
+  const gapmodal  = document.getElementById('gapmodal');
+  const gapvalue  = document.getElementById('gapvalue');
+  const summarygap = document.getElementById('summarygap');
+  const btngap    = document.getElementById('btngap');
+
+  function setGap(v) {
+    gap = Math.max(0, Math.min(60, v));
+    gapvalue.textContent = gap;
+    summarygap.textContent = gap + 'm';
+    btngap.textContent = gap + 'm';
+  }
+  function openGap() {
+    gapmodal.classList.remove('hidden');
+    gapmodal.classList.add('flex');
+  }
+  function closeGap() {
+    gapmodal.classList.add('hidden');
+    gapmodal.classList.remove('flex');
+  }
+  gapminus.addEventListener('click', () => setGap(gap - 5));
+  gapplus.addEventListener('click', () => setGap(gap + 5));
+  gapok.addEventListener('click', closeGap);
+  gapcancel.addEventListener('click', closeGap);
+  gapmodal.addEventListener('click', (e) => { if (e.target === gapmodal) closeGap(); });
+  document.addEventListener('keydown', (e) => {
+    if (!gapmodal.classList.contains('hidden')) {
+      if (e.key === 'j' || e.key === 'ArrowLeft') setGap(gap - 5);
+      else if (e.key === 'k' || e.key === 'ArrowRight') setGap(gap + 5);
+      else if (e.key === 'Enter') closeGap();
+      else if (e.key === 'Escape') closeGap();
+    }
+  });
+
+  // Row click → select
+  slotlist.querySelectorAll('.slot-row').forEach(row => {
+    row.addEventListener('click', () => selectRow(row));
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      selectRow(row);
+      ctxmenu.style.top = (e.clientY - 100) + 'px';
+      ctxmenu.style.left = (e.clientX - 20) + 'px';
+      ctxmenu.classList.remove('hidden');
+    });
+  });
+
+  function selectRow(row) {
+    slotlist.querySelectorAll('.slot-row').forEach(r => {
+      r.classList.remove('selected');
+      const arrow = r.querySelector('.accent.font-bold');
+      if (arrow) arrow.textContent = '';
+    });
+    row.classList.add('selected');
+    if (!row.querySelector('.accent.font-bold')) {
+      const a = document.createElement('span');
+      a.className = 'accent font-bold';
+      a.textContent = '▶';
+      row.appendChild(a);
+    } else {
+      row.querySelector('.accent.font-bold').textContent = '▶';
+    }
+    selected = row;
+    toolbar.querySelector('[data-action="trim"]').disabled = false;
+    toolbar.querySelector('[data-action="delete"]').disabled = false;
+  }
+
+  // Close context menu on outside click
+  document.addEventListener('click', () => ctxmenu.classList.add('hidden'));
+
+  // Toolbar buttons
+  toolbar.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', () => {
+      if (b.disabled) return;
+      const a = b.dataset.action;
+      if (a === 'new') alert('Create slot (+offset)');
+      if (a === 'trim') alert('Trim -15m on: ' + (selected ? selected.dataset.id : 'none'));
+      if (a === 'gap') openGap();
+      if (a === 'delete') {
+        if (selected && confirm('Delete slot ' + selected.dataset.id + '?')) selected.remove();
+      }
+    });
+  });
+  // Summary "Free space" stat is also clickable
+  document.querySelector('[data-action="gap"]').addEventListener('click', openGap);
+
+  // Context menu actions
+  ctxmenu.querySelectorAll('.ctx-item').forEach(it => {
+    it.addEventListener('click', () => {
+      if (!selected) return;
+      const a = it.dataset.act;
+      if (a === 'copy') alert('Copied: ' + selected.dataset.id);
+      if (a === 'trim') alert('Trim -15m on: ' + selected.dataset.id);
+      if (a === 'delete' && confirm('Delete slot ' + selected.dataset.id + '?')) selected.remove();
+      ctxmenu.classList.add('hidden');
+    });
+  });
+
+  // Initial: select first row, disable contextual buttons until a row exists
+  selectRow(slotlist.querySelector('.slot-row'));
+</script>
+</body>
+</html>
