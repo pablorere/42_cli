@@ -669,7 +669,7 @@ int main(int argc, char* argv[]) {
             state.status_msg = i18n::tr("msg_logged_out");
         }
         login_mode = true;
-        image_renderer::clear_kitty_images();
+        image_renderer::clear_images();
     };
 
     auto activate_root_menu = [&]() {
@@ -780,7 +780,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (current_tab != prev_tab) {
-            image_renderer::clear_kitty_images();
+            image_renderer::clear_images();
             minimap_hover = -1;
             prev_tab = current_tab;
             if (current_tab == Tab::Cluster) {
@@ -848,7 +848,7 @@ int main(int argc, char* argv[]) {
 
         // Resize event
         if (ch == KEY_RESIZE) {
-            image_renderer::clear_kitty_images();
+            image_renderer::clear_images();
             renderer.refresh_now();
             continue;
         }
@@ -1357,7 +1357,7 @@ int main(int argc, char* argv[]) {
                 int next = cluster_layout::nearest_occupied(cs, cluster_room, cluster_sel, dir, 0);
                 if (next != cluster_sel) {
                     cluster_sel = next;
-                    image_renderer::clear_kitty_images();
+                    image_renderer::clear_images();
                     enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
                 }
             }
@@ -1402,7 +1402,7 @@ int main(int argc, char* argv[]) {
                     case MouseAction::ClusterRoom:
                         if (hit.index >= 0 && hit.index < 4) {
                             cluster_room = hit.index;
-                            image_renderer::clear_kitty_images();
+                            image_renderer::clear_images();
                             snap_cluster_selection();
                             enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
                         }
@@ -1414,7 +1414,7 @@ int main(int argc, char* argv[]) {
                                     cluster_layout::row_of(hit.index),
                                     cluster_layout::seat_of(hit.index))) {
                                 cluster_sel = hit.index;
-                                image_renderer::clear_kitty_images();
+                                image_renderer::clear_images();
                                 enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
                             }
                         }
@@ -1485,7 +1485,7 @@ int main(int argc, char* argv[]) {
                 dash_sel = 0;
             } else if (current_tab == Tab::Cluster) {
                 cluster_room = (cluster_room + 3) % 4;
-                image_renderer::clear_kitty_images();
+                image_renderer::clear_images();
                 snap_cluster_selection();
                 enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
             }
@@ -1497,7 +1497,7 @@ int main(int argc, char* argv[]) {
                 dash_sel = 0;
             } else if (current_tab == Tab::Cluster) {
                 cluster_room = (cluster_room + 1) % 4;
-                image_renderer::clear_kitty_images();
+                image_renderer::clear_images();
                 snap_cluster_selection();
                 enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
             }
@@ -1507,7 +1507,7 @@ int main(int argc, char* argv[]) {
         case 'C':
             if (current_tab == Tab::Cluster) {
                 cluster_room = (cluster_room + 1) % 4;
-                image_renderer::clear_kitty_images();
+                image_renderer::clear_images();
                 snap_cluster_selection();
                 enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
             }
@@ -1543,7 +1543,7 @@ int main(int argc, char* argv[]) {
                 int next = cluster_layout::nearest_occupied(cs, cluster_room, cluster_sel, 0, -1);
                 if (next != cluster_sel) {
                     cluster_sel = next;
-                    image_renderer::clear_kitty_images();
+                    image_renderer::clear_images();
                     enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
                 }
             } else if (current_tab != Tab::Dashboard) {
@@ -1557,7 +1557,7 @@ int main(int argc, char* argv[]) {
                 int next = cluster_layout::nearest_occupied(cs, cluster_room, cluster_sel, 0, +1);
                 if (next != cluster_sel) {
                     cluster_sel = next;
-                    image_renderer::clear_kitty_images();
+                    image_renderer::clear_images();
                     enqueue_cluster_image_if_needed(cluster_room, cluster_sel);
                 }
             } else if (current_tab != Tab::Cluster) {
@@ -1785,7 +1785,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    image_renderer::clear_kitty_images();
+    image_renderer::clear_images();
     worker.stop();
     network::global_cleanup();
     return 0;

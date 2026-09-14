@@ -80,6 +80,10 @@ static const BorderChars& get_border_chars() {
 // Constructor & Destructor
 // ─────────────────────────────────────────────────────────────────────────────
 Renderer::Renderer() {
+    // Probe terminal graphics support before ncurses claims stdin, so capability
+    // query replies cannot be mistaken for user keystrokes.
+    image_renderer::warm_up();
+
     std::setlocale(LC_ALL, "");
     initscr();
     cbreak();
@@ -343,7 +347,10 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                     MenuState& menu)
 {
     getmaxyx(stdscr, rows_, cols_);
-    erase();
+    // Sixel/iTerm2/half-block pixels are drawn outside the ncurses cell model,
+    // so a pending clear must force a full repaint to scrub the old image.
+    if (image_renderer::take_repaint_request()) clear();
+    else erase();
     hitboxes_.clear();
     preview_img_ = ImageBox{};
     minimap_hover_ = minimap_hover;
@@ -526,14 +533,14 @@ void Renderer::draw(SharedState& state, Tab current_tab,
             sig += ';';
         }
         if (sig != image_sig_) {
-            image_renderer::clear_kitty_images();
+            image_renderer::clear_images();
             image_sig_ = sig;
         }
 
         for (const auto& p : placements)
             image_renderer::render_image(p.key, p.row, p.col, p.w, p.h, rows_, cols_);
     } else if (!image_sig_.empty()) {
-        image_renderer::clear_kitty_images();
+        image_renderer::clear_images();
         image_sig_.clear();
     }
 

@@ -12,8 +12,29 @@ It provides a fast ncurses interface for profile data, projects, slots, roadmap,
 - Dashboard cluster minimap with hover inspector and per-user profile screen
 - Slot creation, trimming, and deletion (beginner-friendly high-contrast view)
 - Subject PDF download and in-app preview
+- Inline images (profile photos + PDF previews) with automatic protocol detection
 - 10 built-in themes with interactive theme switcher
 - Config file + environment variable overrides
+
+## Terminal image support
+
+Images are drawn with the best protocol the terminal supports, detected at
+startup (no configuration required):
+
+| Protocol | Terminals |
+| --- | --- |
+| Kitty graphics | Kitty, WezTerm, Ghostty |
+| iTerm2 inline images (OSC 1337) | iTerm2 |
+| SIXEL (built-in encoder) | foot, mlterm, contour, xterm+sixel, other sixel terminals |
+| Truecolor half-blocks (▀) | any `COLORTERM=truecolor` terminal |
+| 256-color / ASCII half-blocks | everything else |
+
+Kitty and iTerm2 render at native pixel resolution; the vendored SIXEL encoder
+quantizes to a 240-color palette with optional ordered dithering. When only
+text cells are available, a high-quality area-averaged half-block renderer
+preserves the aspect ratio. Alacritty does not support native graphics, so it
+uses the half-block fallback (truecolor when `COLORTERM=truecolor`, otherwise
+256-color, and finally ASCII on colorless terminals).
 
 ## Requirements
 
