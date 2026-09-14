@@ -134,6 +134,108 @@ transcribed in `api42-endpoints.md` under each endpoint's `Auth/scope` line.
 - `GET https://api.intra.42.fr/oauth/token/info` with `Authorization: Bearer <token>`
   returns `{resource_owner_id, scopes, expires_in_seconds, application, created_at}`.
 
+## Resource descriptions
+
+Short description of each resource, from its index page.
+
+- **accreditations**
+- **achievements** — Meta-goals earned by users all along their progression.
+- **achievements users** — which earned an achievement
+- **alumnized users**
+- **amendments** — Modifications applied to an internship.
+- **announcements** — An announcement made to users in a cursus on their homepage.
+- **anti grav units**
+- **anti grav units users**
+- **apps** — Applications for the API v2
+- **attachments** — All data which can be linked, like videos, pdfs, or links.
+- **balances** — The balance of a pool
+- **bloc deadlines** — A bloc
+- **blocs** — A bloc is the managing container of coalitions.
+- **broadcasts** — publicated on a campus
+- **campus** — Places where 42 users works
+- **campus users** — The users wich are in a campus
+- **certificates**
+- **certificates users** — User belonging to a certificate.
+- **closes** — The closing of a 42 account
+- **clusters** — The clusters
+- **coalitions** — A users competing inside of a bloc.
+- **coalitions users** — coalition.
+- **commands** — Products are sold on the intranet shop, here are commands
+- **community services** — A task that an user have to do for the community. Usually linked with a close.
+- **companies** — from companies website
+- **correction point historics**
+- **cursus** — An educational cycle in 42
+- **cursus users** — The users wich are in a cursus
+- **dashes** — The Dash is a short-time project
+- **dashes users** — The dash of a user
+- **endpoints** — A endpoint for a campus TL,DR In order to synchronize all users between the intranet and the local storage system user for authentification (like LDAP) set on a campus, each campus must set a webservice which will be called by the intranet on a user creation / update / close / unclose. A short implementation is available here. Endpoints The following endpoints will be called on actions on users, depending on his campus, and are: Close Called when a user is closed. POST /users/%user/close Parameters: { "id":5696, "user_id":16814, "closer_id":109, "reason":"La raison du close", "state":"close", "created_at":"2016-01-23T14:59:22.789Z", "updated_at":"2016-01-23T14:59:22.789Z", "key"=>"a_secret_for_your_webservice" } Unclose Called when a user is unclosed. POST /users/%user/unclose Parameters: { "key"=>"a_secret_for_your_webservice" } Update Called when a user is updated. POST /users/%user/update Parameters: # All the user fields. If the password is changed, the new password is displayed, uncrypted. { "uid":"andre", "login":"andre", "key":"a_secret_for_your_webservice", "id":74, "email":"[email protected]", "password":"the_new_password", "created_at":"2016-01-20T00:32:50.226Z", "updated_at":"2016-09-16T23:36:59.971Z", "image_url":"/uploads/users/andre.jpg", "first_name":"Andre", "last_name":"AUBIN", "phone":null, "pool_year":null, "pool_month":null, "kind":"admin", "status":null, "campus":[ { "id":1, "name":"Paris", "created_at":"2015-05-19T10:53:31.459Z", "updated_at":"2016-09-22T09:11:25.476Z", "time_zone":"Europe/Paris", "language_id":1, "slug":"paris", "main_email":"[email protected]", "endpoint_id":1, "vogsphere_id":1 } ], "primary_campus":{ "id":1, "name":"Paris", "created_at":"2015-05-19T10:53:31.459Z", "updated_at":"2016-09-22T09:11:25.476Z", "time_zone":"Europe/Paris", "language_id":1, "slug":"paris", "main_email":"[email protected]", "endpoint_id":1, "vogsphere_id":1 }, "meta":{ "additional":"informations", "can_be":"set here" } } Create Called when a user is created. POST /users/new Parameters: # All the fields of the new user. { "uid":"andre", "login":"andre", "key":"a_secret_for_your_webservice", "id":74, "email":"[email protected]", "password":"the_new_password", "created_at":"2016-01-20T00:32:50.226Z", "updated_at":"2016-09-16T23:36:59.971Z", "image_url":"/uploads/users/andre.jpg", "first_name":"Andre", "last_name":"AUBIN", "phone":null, "pool_year":null, "pool_month":null, "kind":"admin", "status":null, "campus":[ { "id":1, "name":"Paris", "created_at":"2015-05-19T10:53:31.459Z", "updated_at":"2016-09-22T09:11:25.476Z", "time_zone":"Europe/Paris", "language_id":1, "slug":"paris", "main_email":"[email protected]", "endpoint_id":1, "vogsphere_id":1 } ], "primary_campus":{ "id":1, "name":"Paris", "created_at":"2015-05-19T10:53:31.459Z", "updated_at":"2016-09-22T09:11:25.476Z", "time_zone":"Europe/Paris", "language_id":1, "slug":"paris", "main_email":"[email protected]", "endpoint_id":1, "vogsphere_id":1 }, "meta":{ "additional":"informations", "can_be":"set here" } } The meta user field contain additional information which can be added trough the API, like, for example, a group_id, and which will not be saved in the database. The uncrypted password is shown, but will not be saved in the database. So it’s the only time it will be available on user creation. Error handling The implemented webserice have to handle errors correctly, and return the good HTTP response code. Http CodeMeaning404 (Not found)The user can’t be found 422 (Unprocessable entity)Parameters are unprocessable or missing 500 (Internal server error)Error on the webservice 200 (Ok) (or 200, 201, 204)Ok It’s optional, but we encourage you to respond 200, 201 and 204 for actions. Security and format Exchanges MUST be done over a SSL tunnel (e.g. https). If the endpoint requires a secret token, it will be sent with the data under the key. If datas are sent, they will always be in JSON format. Additional data The meta user field contain additional information which can be added trough the API, like, for example, a group_id, and which will not be saved in the database. Example of implementation available here
+- **evaluations** — The Evaluation of a project See more
+- **events** — The events in a campus or a cursus
+- **events users** — registered to an event
+- **exams** — The exam in a campus or a cursus
+- **exams users**
+- **experiences** — An experience gained by an user in a particular skill.
+- **expertises** — Pedagogic expertises
+- **expertises users** — which have an expertise
+- **feedbacks** — The feedback of a ScaleTeam or an Event
+- **flags** — from scales
+- **flash users** — The Flash Users
+- **flashes** — The Flash
+- **gitlab users**
+- **groups** — in which users belong to. It will display a label on their profile and on the forum.
+- **groups users** — who are in a group.
+- **internships** — The internship
+- **journals**
+- **languages** — The language
+- **languages users** — The languages of a user
+- **levels** — A level indicator for a cursus.
+- **locations** — The location of an user in a campus
+- **mailings** — Mails from and between 42 entities
+- **notes** — A note for an user
+- **notions** — The elearning notion in a cursus
+- **offers** — from companies website
+- **offers users** — who have subscribed to an offer.
+- **params project sessions rules** — The value of a parameter for a project sessions rule.
+- **partnerships** — Pedagogic partnerships
+- **partnerships users** — doing a partnership
+- **patronages** — A patronage between two users
+- **patronages reports** — A report for a patronage
+- **pools** — The pool of evaluation points.
+- **products** — are sold on the intranet shop
+- **project data** — for the graph
+- **project sessions** — A project session defines a particular behaviour for a project, based on the cursus and / or the campus .
+- **project sessions rules** — A rule linked to a project session.
+- **project sessions skills** — A skill linked to a project session.
+- **projects** — Pedagogic projects of a cursus
+- **projects users** — which did or are doing a project The ProjectsUser represents a user’s subscription to a project. A subscribed user can have one team or more based on his number of attempts to this project. Be careful to always select the active team (the last team). Here are basically the different states a user can have on a project: He (the user) doesn’t have a projects_user, he is not registered on the project. He has no team, he is actually searching a group, in order to create one. He has a team, which is not locked (the locked_at field is not null), he is creating a group. If the user has a locked team, then either he did, or he is doing the project. At this point, the available states are: His team is closed and has a final_mark (the locked_at, closed_at and final_mark fields aren’t null), he has finished his project. If he doesn’t have a final_mark yet, he his waiting for evaluation. His team is not closed yet (and obviously doesn’t have a final mark), he is in progress. Some exceptional cases happen when a project has children (like piscines), or begins at a specific time (like rushes). The team is locked, but the project has a begin_at field which starts is in the future, so he his waiting to start. The team is locked, but the project has children. In this case, look at the teams on the child projects, and consider this one in progress.
+- **quests** — which can or must be done by users
+- **quests users** — which earned an quest
+- **roles** — Grants particular privileges to entities like users and applications
+- **roles entities** — The applications linked to a role
+- **rules** — A rule for a project
+- **scale teams** — A defence of a team (on a project), involving an evaluator
+- **scales** — A scale is composed by questions which allows an users to rate the quality of a project .
+- **scores** — Points given to a coalition.
+- **search** — among the intranet resources.
+- **skills** — A particlar skill.
+- **slots** — The slots available to users for booking a project scale team. A Slot is a time interval when a user desclares himself available to evaluate other users. Actually, a slot must be at least 1800 minutes by default (with a granularity of 15 minutes). Campus can manage and edit the minimum slot duration. A slot can be set every day between 30 minutes and 2 weeks in advance.
+- **squads** — A squads is the managing container of squads_users.
+- **squads users** — A squads_users will group users inside a same coalition
+- **subnotions** — The elearning subnotion in a notion
+- **tags** — Non-hierarchical keyword, acting as a meta-data and helping to describe entities.
+- **tags users** — Resource associating a User and a Tag.
+- **teams** — One or many users which have to finish a project together.
+- **teams uploads** — An uploaded mark for a team, given by a bot (like the Moulinette), without any defence.
+- **teams users** — Team composed of one User
+- **titles** — a user can obtain, generally through achievements. It will be displayed on their profile and on the forum.
+- **titles users** — who have a title.
+- **transactions** — Transaction represents Altarian Dollars earned.
+- **translations**
+- **user candidatures** — The candidature of an user
+- **users** — A 42 student, staff, or any entity with a 42 account.
+- **waitlists** — Waitlist for an event or an exam.
+- **webhook registeries**
+
 ## Resources & endpoints
 
 > `[restricted]` = the docs mark it with `_vpn_key_` (needs an elevated app role).
