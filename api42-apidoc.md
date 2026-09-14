@@ -65,6 +65,42 @@ To act **on behalf of a user** (3rd-party web app):
 | Contributing | `/apidoc/guides/contributing` | contributing to the docs |
 | Readme | `/apidoc/guides/README` | documentation index |
 
+## Access control — roles & scopes
+
+Write / restricted endpoints are gated by two independent mechanisms.
+
+**Application scopes** (token-level, requested at authorize time). Observed in
+the docs: `public` (default), `projects`, `tig`, `profile`.
+
+**Application roles** (app-level, surfaced in the `x-application-roles`
+response header). Aggregate over the endpoint detail pages whose *Notes*
+mention a role (counts = pages):
+
+| Role | Pages |
+|------|------:|
+| Advanced tutor | 191 |
+| Advanced staff | 47 |
+| Basic staff | 34 |
+| Companies manager | 12 |
+| 42network | 10 |
+| Events manager | 9 |
+| Tutor | 9 |
+| Achievements manager | 6 |
+| Video manager | 6 |
+| Student tutor | 6 |
+| Notes manager | 5 |
+| Advanced notes manager | 5 |
+| Transactions manager | 4 |
+| Translater | 4 |
+| Basic tutor | 3 |
+| Community manager | 3 |
+| Shop manager | 3 |
+| Intrateam / Network | 1 each |
+
+Many endpoints additionally require a **token resource owner** scoped on
+`projects` or `profile` (e.g. the slot mutations). Per-endpoint requirements are
+transcribed in `api42-endpoints.md` under each endpoint's `Auth/scope` line.
+
 ## Conventions
 
 ### Errors
