@@ -8,12 +8,19 @@ It provides a fast ncurses interface for profile data, projects, slots, roadmap,
 - Native TUI built with ncurses
 - 42 Intra authentication (credentials or session cookie)
 - Dashboard, Roadmap, Slots, and Cluster tabs
+- **Dashboard**: flat scrollable view — summary strip, cursus progress, action
+  center, recent submissions, recent evaluations and evaluation economy
+- **Slot manager**: clickable toolbar (new / −15m / delete / free-space),
+  free-space gap picker (`j`/`k` or `←`/`→`), and a right-click context menu
+  (copy ID / trim / delete)
+- **Cluster**: live minimap with clickable room pills (C1–C4), legend, hover
+  inspector and full-screen user profiles
+- Full mouse support: hover highlight, click, right-click context menus, wheel scroll
 - Global dynamic search for online users and projects
-- Dashboard cluster minimap with hover inspector and per-user profile screen
-- Slot creation, trimming, and deletion (beginner-friendly high-contrast view)
 - Subject PDF download and in-app preview
+- Inline avatar/subject images via Kitty / iTerm2 / `chafa` / ANSI half-blocks
 - 10 built-in themes with interactive theme switcher
-- Config file + environment variable overrides
+- English + Spanish (i18n), config file + environment variable overrides
 
 ## Requirements
 
@@ -122,6 +129,7 @@ Fallbacks when XDG variables are missing:
 - `INTRA_BORDER_STYLE`
 - `INTRA_COOKIE_PATH`
 - `INTRA_SLOT_OFFSET`
+- `INTRA_SLOT_GAP`
 - `INTRA_TIMEOUT`
 
 ## Keybindings (main)
@@ -131,9 +139,8 @@ Fallbacks when XDG variables are missing:
 - `1..4`: jump to Dashboard, Roadmap, Slots, Cluster
 - `/`: focus the global search bar (Esc to leave); type to filter online users and projects, `Enter` opens
 - `Esc`: open the main menu (Settings / Help / Resume / Quit); Esc again resumes
-- `s`: create slot or download subject (context dependent)
-- `d`: trim last 15 minutes from selected slot
-- `D` / `x`: delete selected slot block
+- Dashboard: `j`/`k` scroll the flat dashboard; `[`/`]` jump to top/bottom; `Enter`/`f` inspect feedback
+- Slots: `s` create, `d` trim −15m, `D`/`x` delete, `Enter`/click the free-space button for the gap picker
 - `t`: open theme chooser
 - `r`: refresh data
 - `p`: open subject preview
@@ -141,6 +148,20 @@ Fallbacks when XDG variables are missing:
 - `Enter` on Cluster: open the selected user's profile screen
 - `q`: quit (press twice to confirm; toggle in Settings)
 
+## Mouse
+
+- **Click** — tabs, list rows, slot toolbar buttons, cluster desks, minimap room pills
+- **Hover** — highlights rows/buttons and opens the cluster minimap inspector
+- **Right-click** — slot context menu (copy ID / trim / delete) or copy a cluster login
+- **Wheel** — scroll lists and the dashboard
+
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — codebase internals
+- [`endpoints.md`](endpoints.md) — intranet endpoint surface
+- [`api42-apidoc.md`](api42-apidoc.md), [`api42-endpoints.md`](api42-endpoints.md), [`api42-examples.md`](api42-examples.md) — official API v2
+- [`features.md`](features.md) — feature catalogue
+
 ## License
 
-MIT. See `/home/runner/work/42_cli/42_cli/LICENSE`.
+MIT. See [`LICENSE`](LICENSE).

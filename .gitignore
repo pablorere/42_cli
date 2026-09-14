@@ -1,3 +1,6 @@
 42_cli
 obj/
 subjects/
+
+# User-specific agent tooling symlink (absolute path to $HOME)
+.agents
