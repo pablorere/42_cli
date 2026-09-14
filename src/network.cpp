@@ -522,7 +522,8 @@ bool login_with_cookie(const std::string& cookie_input,
 // ─── Shared profile-page parsing (used for self and other students) ──────────
 static void parse_profile_pages(const std::string& json_body,
                                 const std::string& user_html,
-                                Profile&           out);
+                                Profile&           out,
+                                bool               include_private);
 
 // ─── Profile scraper ──────────────────────────────────────────────────────────
 bool fetch_profile(const std::string& cookie_file, Profile& out, std::string& error_out) {
@@ -595,13 +596,14 @@ bool fetch_profile(const std::string& cookie_file, Profile& out, std::string& er
         }
     }
 
-    parse_profile_pages(json_body, user_html, out);
+    parse_profile_pages(json_body, user_html, out, /*include_private=*/true);
     return true;
 }
 
 static void parse_profile_pages(const std::string& json_body,
                                 const std::string& user_html,
-                                Profile&           out) {
+                                Profile&           out,
+                                bool               include_private) {
     if (!json_body.empty() && json_body[0] == '{') {
         // Full name
         size_t fn = json_body.find("\"full_name\":\"");
@@ -660,8 +662,8 @@ static void parse_profile_pages(const std::string& json_body,
         }
     }
 
-    // Wallet from HTML
-    {
+    // Wallet from HTML (private — only parsed for the logged-in user)
+    if (include_private) {
         size_t wp = user_html.find("user-wallet-value");
         if (wp != std::string::npos) {
             size_t start = user_html.find('>', wp);
@@ -679,8 +681,8 @@ static void parse_profile_pages(const std::string& json_body,
         }
     }
 
-    // Correction points from HTML
-    {
+    // Correction points from HTML (private — only parsed for the logged-in user)
+    if (include_private) {
         size_t cp = user_html.find("user-correction-point-value");
         if (cp != std::string::npos) {
             size_t start = user_html.find('>', cp);
@@ -849,7 +851,7 @@ bool fetch_user_profile(const std::string& cookie_file,
         return false;
     }
 
-    parse_profile_pages(json_body, user_html, out);
+    parse_profile_pages(json_body, user_html, out, /*include_private=*/false);
     return true;
 }
 

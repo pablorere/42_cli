@@ -9,7 +9,7 @@
 #include <cstdlib>
 
 // ─── Tab indices ──────────────────────────────────────────────────────────────
-enum class Tab { Dashboard = 0, Projects = 1, Slots = 2, Roadmap = 3, Cluster = 4 };
+enum class Tab { Dashboard = 0, Roadmap = 1, Slots = 2, Cluster = 3 };
 
 // ─── Project record ───────────────────────────────────────────────────────────
 struct Project {

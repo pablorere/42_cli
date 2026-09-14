@@ -5,14 +5,35 @@
 #include <utility>
 
 // ─── Mouse hit-testing ────────────────────────────────────────────────────────
+// ─── Global dynamic search ────────────────────────────────────────────────────
+struct SearchResult {
+    enum class Kind { User, Project };
+    Kind        kind = Kind::User;
+    std::string title;     // "@login — Name" or project name
+    std::string subtitle;  // seat / grade
+    std::string key;       // login (user) or project name (project)
+    std::string cdn;       // avatar URL for users (optional)
+    int         room = -1; // user's room (0-3), -1 if unknown
+    int         desk = -1; // user's desk index, -1 if unknown
+};
+
+struct SearchState {
+    bool                      focus = false;
+    std::string               query;
+    int                       sel = 0;
+    std::vector<SearchResult> results;
+};
+
 enum class MouseAction {
     None,
-    TabBar,       // index = tab (0-4)
+    TabBar,       // index = tab (0-3)
     DashSubview,  // index = subview (0-2)
     ListRow,      // index = absolute row in the active tab's list
     ClusterRoom,  // index = room (0-3)
     ClusterDesk,  // index = desk (0-47)
     DashMinimap,  // index = room * CELLS + desk (dashboard minimap)
+    SearchBar,    // global search bar
+    SearchResult, // index = result index
     LoginMethod,  // index = login method (0-2)
     LoginField,   // index = field (0-1)
     ThemeRow,     // index = theme (0-9)
@@ -42,7 +63,7 @@ public:
      * Takes a snapshot of SharedState under its mutex.
      */
     void draw(SharedState& state, Tab current_tab,
-              int project_sel, int slot_sel, int tree_sel, int cluster_sel,
+              int slot_sel, int tree_sel, int cluster_sel,
               bool login_mode, int login_method, int active_field,
               const std::string& login_buf, const std::string& pass_buf,
               const std::string& cookie_buf, const std::string& detected_file,
@@ -56,13 +77,10 @@ public:
               bool action_menu_open = false,
               const std::vector<std::pair<std::string, bool>>& action_items = {},
               int action_sel = 0,
-              int minimap_hover = -1);
-
-    // Overload for simple calling
-    void draw(SharedState& state, Tab current_tab,
-              int project_sel, int slot_sel,
-              bool login_mode, const std::string& login_buf,
-              bool password_mode, const std::string& pass_buf);
+              int minimap_hover = -1,
+              bool user_modal_open = false,
+              const std::string& user_modal_login = std::string(),
+              const SearchState& search = SearchState{});
 
     void refresh_now();
 
@@ -84,6 +102,8 @@ private:
     }
 
     void draw_tab_bar(Tab current_tab, bool loading);
+    void draw_search_bar(const SearchState& s, int row);
+    void draw_search_results(const SearchState& s, int top, int bottom);
     void draw_status_bar(const std::string& login,
                          const std::string& status_msg,
                          const std::string& error_msg,
@@ -118,6 +138,9 @@ private:
     ImageBox draw_subject_panel(const SubjectPreview& pv, int x, int top, int bottom, int w);
     ImageBox draw_subject_modal(const SubjectPreview& pv, int scroll);
     void draw_action_menu(const std::vector<std::pair<std::string, bool>>& items, int sel);
+    void draw_user_modal(const Profile& p,
+                         const std::unordered_map<std::string, ClusterProfileEntry>& profiles,
+                         const std::string& login);
 
     std::vector<Hitbox> hitboxes_;
     ImageBox            preview_img_;

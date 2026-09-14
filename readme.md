@@ -7,8 +7,10 @@ It provides a fast ncurses interface for profile data, projects, slots, roadmap,
 
 - Native TUI built with ncurses
 - 42 Intra authentication (credentials or session cookie)
-- Dashboard, Projects, Slots, Roadmap, and Cluster tabs
-- Slot creation, trimming, and deletion
+- Dashboard, Roadmap, Slots, and Cluster tabs
+- Global dynamic search for online users and projects
+- Dashboard cluster minimap with hover inspector and per-user profile screen
+- Slot creation, trimming, and deletion (beginner-friendly high-contrast view)
 - Subject PDF download and in-app preview
 - 10 built-in themes with interactive theme switcher
 - Config file + environment variable overrides
@@ -83,7 +85,8 @@ Fallbacks when XDG variables are missing:
 
 - `h j k l`: Vim-style navigation
 - `Tab` / `Shift-Tab` / `gt` / `gT`: switch tabs
-- `1..5`: jump directly to tabs
+- `1..4`: jump to Dashboard, Roadmap, Slots, Cluster
+- `/`: focus the global search bar (Esc to leave); type to filter online users and projects, `Enter` opens
 - `s`: create slot or download subject (context dependent)
 - `d`: trim last 15 minutes from selected slot
 - `D` / `x`: delete selected slot block
@@ -91,6 +94,7 @@ Fallbacks when XDG variables are missing:
 - `r`: refresh data
 - `p`: open subject preview
 - `y`: copy selected cluster login
+- `Enter` on Cluster: open the selected user's profile screen
 - `q`: quit
 
 ## License

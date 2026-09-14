@@ -11,6 +11,7 @@
 
 #include <ncurses.h>
 #include <string>
+#include <cctype>
 #include <iostream>
 #include <chrono>
 #include <ctime>
@@ -24,6 +25,38 @@
 // ─── Global quit flag (signal handler) ───────────────────────────────────────
 static std::atomic<bool> g_quit{false};
 static void handle_sigint(int) { g_quit.store(true); }
+
+// Parse a cluster host like "c3r1s2" into 0-based room/row/seat.
+static bool parse_host_desk(const std::string& host, int& room, int& row, int& seat) {
+    std::string h;
+    h.reserve(host.size());
+    for (char c : host) {
+        if (c != '-' && c != '_' && c != ' ')
+            h += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    size_t i = 1;
+    auto read_num = [&](int& out) -> bool {
+        int v = 0; bool any = false;
+        while (i < h.size() && std::isdigit(static_cast<unsigned char>(h[i]))) {
+            v = v * 10 + (h[i] - '0'); ++i; any = true;
+        }
+        out = v;
+        return any;
+    };
+    if (h.size() < 3 || h[0] != 'c') return false;
+    int r1 = 0, r2 = 0, r3 = 0;
+    if (!read_num(r1)) return false;
+    if (i >= h.size() || h[i] != 'r') return false;
+    ++i;
+    if (!read_num(r2)) return false;
+    if (i >= h.size() || h[i] != 's') return false;
+    ++i;
+    if (!read_num(r3)) return false;
+    room = r1 - 1; row = r2 - 1; seat = r3 - 1;
+    return room >= 0 && room < 4 &&
+           row >= 0 && row < cluster_layout::ROWS &&
+           seat >= 0 && seat < cluster_layout::SEATS;
+}
 
 // ─── CLI Help & List Themes ───────────────────────────────────────────────────
 static void print_help(const char* prog) {
@@ -41,15 +74,16 @@ static void print_help(const char* prog) {
               << "  h, j, k, l               Vim movement across tabs, trees, and lists\n"
               << "  [ / ]                    Cycle Dashboard subviews (Overview, Scale Teams, Points & Pool)\n"
               << "  Enter / f                Inspect pending feedback details / critique breakdown in Dashboard\n"
-              << "  Tab / Shift-Tab / gt/gT  Next / previous tab (5 tabs)\n"
-              << "  1, 2, 3, 4, 5            Direct jump to Dashboard, Projects, Slots, Roadmap, Cluster\n"
-              << "  Space / Enter            Toggle milestone in Roadmap / download subject\n"
+              << "  Tab / Shift-Tab / gt/gT  Next / previous tab (4 tabs)\n"
+              << "  /                        Focus global search (online users + projects)\n"
+              << "  1, 2, 3, 4               Direct jump to Dashboard, Roadmap, Slots, Cluster\n"
+              << "  Space / Enter            Toggle milestone in Roadmap / open user profile in Cluster\n"
               << "  d                        Trim last 15m from slot / Download PDF subject\n"
               << "  D / x                    Delete entire slot block\n"
               << "  s                        Create slot (+offset) / Download PDF subject\n"
               << "  t                        Open interactive Theme Chooser modal\n"
               << "  r                        Refresh/sync data from intra\n"
-              << "  p                        Open downloaded subject preview (Projects/Roadmap)\n"
+              << "  p                        Open downloaded subject preview (Roadmap)\n"
               << "  Enter                    Project action menu (preview / external / download)\n"
               << "  y                        Copy selected cluster user's login to clipboard\n"
               << "  Mouse                    Click tabs/lists/desks; wheel scrolls; right-click copies login\n"
@@ -149,12 +183,14 @@ int main(int argc, char* argv[]) {
     int  dash_subview = 0; // 0: Overview, 1: Scale Teams, 2: Points & Pool
     int  dash_sel     = 0;
     bool dash_inspect = false;
-    int  project_sel  = 0;
     int  slot_sel     = 0;
     int  tree_sel     = 0;
     int  cluster_sel  = -1;  // -1 when the current cluster has nobody online
     int  cluster_room = 2; // Default to Cluster 3 (index 2) where students are online
     int  minimap_hover = -1; // room*CELLS+desk of the hovered dashboard minimap desk
+    bool        user_modal_open  = false;   // full-screen user profile modal
+    std::string user_modal_login;
+    SearchState search;                     // global dynamic search
 
     auto cluster_snapshot = [&]() {
         std::lock_guard<std::mutex> lk(state.mtx);
@@ -211,19 +247,34 @@ int main(int argc, char* argv[]) {
         return {};
     };
 
-    // Fetch (and cache) the full profile of a desk's occupant on demand.
-    auto fetch_cluster_profile = [&](int room, int idx) {
-        ClusterStudent cs = cluster_student_at(room, idx);
-        if (cs.login.empty()) return;
+    // Enqueue a fetch (and cache) of a student's full public profile.
+    auto request_user_profile = [&](const std::string& login, const std::string& cdn_uri) {
+        if (login.empty()) return;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
-            auto& entry = state.cluster_profiles[cs.login];
+            auto& entry = state.cluster_profiles[login];
             if (!entry.loaded) entry.loading = true;
-            state.status_msg = "Fetching @" + cs.login + " profile…";
+            state.status_msg = "Cargando perfil de @" + login + "…";
         }
-        if (!cs.cdn_uri.empty() && !image_renderer::has_image(cs.cdn_uri))
-            worker.enqueue({ NetTaskKind::FetchImage, cs.cdn_uri, "" });
-        worker.enqueue({ NetTaskKind::FetchClusterProfile, cs.login, "" });
+        if (!cdn_uri.empty() && !image_renderer::has_image(cdn_uri))
+            worker.enqueue({ NetTaskKind::FetchImage, cdn_uri, "" });
+        worker.enqueue({ NetTaskKind::FetchClusterProfile, login, "" });
+    };
+
+    // Open the full-screen profile modal for a cluster desk and load its data.
+    auto open_user_profile = [&](int room, int idx) {
+        ClusterStudent cs = cluster_student_at(room, idx);
+        if (cs.login.empty()) return;
+        user_modal_login = cs.login;
+        user_modal_open  = true;
+        request_user_profile(cs.login, cs.cdn_uri);
+    };
+
+    auto open_user_profile_by_login = [&](const std::string& login, const std::string& cdn) {
+        if (login.empty()) return;
+        user_modal_login = login;
+        user_modal_open  = true;
+        request_user_profile(login, cdn);
     };
 
     auto copy_cluster_login = [&](int idx) {
@@ -234,13 +285,10 @@ int main(int argc, char* argv[]) {
         state.status_msg = "Copied @" + login + " to clipboard";
     };
 
-    // Name/slug of the currently selected project (Projects or Roadmap), or "".
+    // Name/slug of the currently selected roadmap project, or "".
     auto selected_project_name = [&]() -> std::string {
         std::lock_guard<std::mutex> lk(state.mtx);
-        if (current_tab == Tab::Projects) {
-            if (project_sel >= 0 && project_sel < (int)state.profile.projects.size())
-                return state.profile.projects[project_sel].name;
-        } else if (current_tab == Tab::Roadmap) {
+        if (current_tab == Tab::Roadmap) {
             int idx = 0;
             for (const auto& ms : state.profile.roadmap) {
                 if (idx == tree_sel) return {}; // milestone row
@@ -284,6 +332,80 @@ int main(int argc, char* argv[]) {
         };
         action_menu_sel  = has_pdf ? 0 : 2;
         action_menu_open = true;
+    };
+
+    // Activate a search result: users open their profile, projects open the
+    // same context menu used elsewhere.
+    auto run_search_result = [&](const SearchResult& r) {
+        if (r.kind == SearchResult::Kind::User)
+            open_user_profile_by_login(r.key, r.cdn);
+        else
+            open_action_menu(r.key);
+    };
+
+    // Rebuild the dynamic search results from the current snapshot (users
+    // online + projects from recent submissions and the roadmap).
+    auto rebuild_search_results = [&]() {
+        search.results.clear();
+        if (search.query.empty()) { search.sel = 0; return; }
+
+        std::string q = search.query;
+        for (auto& c : q) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        auto matches = [&](const std::string& s) {
+            std::string t = s;
+            for (auto& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return t.find(q) != std::string::npos;
+        };
+
+        std::lock_guard<std::mutex> lk(state.mtx);
+        const Profile& prof = state.profile;
+
+        for (const auto& cs : prof.cluster_students) {
+            if (search.results.size() >= 40) break;
+            std::string name = cs.full_name;
+            auto itp = state.cluster_profiles.find(cs.login);
+            if (name.empty() && itp != state.cluster_profiles.end())
+                name = itp->second.profile.display_name;
+            if (!matches(cs.login) && !matches(name)) continue;
+
+            SearchResult r;
+            r.kind     = SearchResult::Kind::User;
+            r.title    = name.empty() ? cs.login : (cs.login + " — " + name);
+            r.subtitle = cs.host;
+            r.key      = cs.login;
+            r.cdn      = cs.cdn_uri;
+            int room = -1, row = -1, seat = -1;
+            if (parse_host_desk(cs.host, room, row, seat)) {
+                r.room = room;
+                r.desk = cluster_layout::index(row, seat);
+            }
+            search.results.push_back(std::move(r));
+        }
+
+        auto add_project = [&](const std::string& name, const std::string& slug,
+                               const std::string& sub) {
+            if (name.empty() || search.results.size() >= 40) return;
+            if (!matches(name) && (slug.empty() || !matches(slug))) return;
+            std::string key = !slug.empty() ? slug : name;
+            for (const auto& e : search.results) {
+                if (e.kind == SearchResult::Kind::Project && e.key == key) return;
+            }
+            SearchResult r;
+            r.kind     = SearchResult::Kind::Project;
+            r.title    = name;
+            r.subtitle = sub;
+            r.key      = key;
+            search.results.push_back(std::move(r));
+        };
+        for (const auto& pr : prof.projects)
+            add_project(pr.name, "", pr.grade.empty() ? pr.status : pr.grade);
+        for (const auto& ms : prof.roadmap)
+            for (const auto& pr : ms.projects)
+                add_project(pr.name, pr.slug, pr.state);
+
+        if (search.sel >= (int)search.results.size())
+            search.sel = (int)search.results.size() - 1;
+        if (search.sel < 0) search.sel = 0;
     };
 
     // Queue a preview load and mark the shared preview as loading immediately so
@@ -432,7 +554,7 @@ int main(int argc, char* argv[]) {
         // ── Subject preview auto-load for the selected project ────────────────
         if (!login_mode) {
             std::string sel_proj;
-            if (current_tab == Tab::Projects || current_tab == Tab::Roadmap)
+            if (current_tab == Tab::Roadmap)
                 sel_proj = selected_project_name();
             if (sel_proj != preview_project) {
                 preview_project = sel_proj;
@@ -452,13 +574,15 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lk(state.mtx);
             preview_snap = state.preview;
         }
+
+        rebuild_search_results();
         bool preview_panel = !login_mode && !subject_modal_open &&
                              !action_menu_open && !theme_switcher_open &&
-                             (current_tab == Tab::Projects || current_tab == Tab::Roadmap);
+                             (current_tab == Tab::Roadmap);
 
         // Draw the current frame
         renderer.draw(state, current_tab,
-                      project_sel, slot_sel, tree_sel, cluster_sel,
+                      slot_sel, tree_sel, cluster_sel,
                       login_mode, login_method, active_field,
                       user_buf, pass_buf, cookie_buf, detected_file,
                       theme_switcher_open, theme_sel,
@@ -467,7 +591,9 @@ int main(int argc, char* argv[]) {
                       preview_panel, preview_snap,
                       subject_modal_open, subject_scroll,
                       action_menu_open, action_items, action_menu_sel,
-                      minimap_hover);
+                      minimap_hover,
+                      user_modal_open, user_modal_login,
+                      search);
 
         int ch = getch();
         if (ch == ERR) continue;
@@ -476,6 +602,15 @@ int main(int argc, char* argv[]) {
         if (ch == KEY_RESIZE) {
             image_renderer::clear_kitty_images();
             renderer.refresh_now();
+            continue;
+        }
+
+        // ── Full-screen user profile modal ────────────────────────────────────
+        if (user_modal_open) {
+            if (ch == 27 || ch == 'q' || ch == 'Q' || ch == 'x' || ch == 'X') {
+                user_modal_open = false;
+                user_modal_login.clear();
+            }
             continue;
         }
 
@@ -632,6 +767,58 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // ── Global dynamic search input ───────────────────────────────────────
+        if (search.focus) {
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                if (getmouse(&ev) == OK) {
+                    MouseHit hit = renderer.hit_test(ev.y, ev.x);
+                    if (hit.action == MouseAction::SearchResult &&
+                        hit.index >= 0 && hit.index < (int)search.results.size()) {
+                        search.sel = hit.index;
+                        run_search_result(search.results[hit.index]);
+                        search.focus = false;
+                        search.query.clear();
+                        search.results.clear();
+                    }
+                }
+                continue;
+            }
+            if (ch == 27) { // Esc: clear query first, then leave search
+                if (!search.query.empty()) {
+                    search.query.clear();
+                    search.sel = 0;
+                } else {
+                    search.focus = false;
+                }
+                continue;
+            }
+            if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+                if (!search.query.empty()) search.query.pop_back();
+                search.sel = 0;
+                continue;
+            }
+            if (ch == KEY_UP)   { if (search.sel > 0) search.sel--; continue; }
+            if (ch == KEY_DOWN) {
+                if (search.sel + 1 < (int)search.results.size()) search.sel++;
+                continue;
+            }
+            if (ch == '\n' || ch == KEY_ENTER) {
+                if (search.sel >= 0 && search.sel < (int)search.results.size())
+                    run_search_result(search.results[search.sel]);
+                search.focus = false;
+                search.query.clear();
+                search.results.clear();
+                continue;
+            }
+            if (ch >= 32 && ch < 127) {
+                search.query += static_cast<char>(ch);
+                search.sel = 0;
+                continue;
+            }
+            continue; // swallow anything else while typing
+        }
+
         // ── Login mode input handling ─────────────────────────────────────────
         if (login_mode) {
             // Clear error on new user input
@@ -742,10 +929,9 @@ int main(int argc, char* argv[]) {
         }
 
         // ── Normal navigation mode ────────────────────────────────────────────
-        int proj_count = 0, slot_count = 0, tree_count = 0;
+        int slot_count = 0, tree_count = 0;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
-            proj_count    = static_cast<int>(state.profile.projects.size());
             slot_count    = static_cast<int>(state.profile.slots.size());
             for (const auto& ms : state.profile.roadmap) {
                 tree_count++;
@@ -765,8 +951,6 @@ int main(int argc, char* argv[]) {
                     if (fb_count > 0)
                         dash_sel = std::clamp(dash_sel + dir, 0, fb_count - 1);
                 }
-            } else if (current_tab == Tab::Projects && proj_count > 0) {
-                project_sel = std::clamp(project_sel + dir, 0, proj_count - 1);
             } else if (current_tab == Tab::Slots && slot_count > 0) {
                 slot_sel = std::clamp(slot_sel + dir, 0, slot_count - 1);
             } else if (current_tab == Tab::Roadmap && tree_count > 0) {
@@ -803,7 +987,7 @@ int main(int argc, char* argv[]) {
                     MouseHit hit = renderer.hit_test(ev.y, ev.x);
                     switch (hit.action) {
                     case MouseAction::TabBar:
-                        if (hit.index >= 0 && hit.index < 5)
+                        if (hit.index >= 0 && hit.index < 4)
                             current_tab = static_cast<Tab>(hit.index);
                         break;
                     case MouseAction::DashSubview:
@@ -813,8 +997,6 @@ int main(int argc, char* argv[]) {
                     case MouseAction::ListRow:
                         if (current_tab == Tab::Dashboard && dash_subview == 1)
                             dash_sel = hit.index;
-                        else if (current_tab == Tab::Projects)
-                            project_sel = hit.index;
                         else if (current_tab == Tab::Slots)
                             slot_sel = hit.index;
                         else if (current_tab == Tab::Roadmap)
@@ -844,7 +1026,20 @@ int main(int argc, char* argv[]) {
                         if (hit.index >= 0) {
                             int mroom = hit.index / cluster_layout::CELLS;
                             int mdesk = hit.index % cluster_layout::CELLS;
-                            fetch_cluster_profile(mroom, mdesk);
+                            open_user_profile(mroom, mdesk);
+                        }
+                        break;
+                    case MouseAction::SearchBar:
+                        search.focus = true;
+                        search.sel   = 0;
+                        break;
+                    case MouseAction::SearchResult:
+                        if (hit.index >= 0 && hit.index < (int)search.results.size()) {
+                            search.sel = hit.index;
+                            run_search_result(search.results[hit.index]);
+                            search.focus = false;
+                            search.query.clear();
+                            search.results.clear();
                         }
                         break;
                     default:
@@ -974,26 +1169,31 @@ int main(int argc, char* argv[]) {
 
         // ── Tab switching ─────────────────────────────────────────────────────
         case '\t':
-            current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 1) % 5);
+            current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 1) % 4);
             break;
 
         case 'g':
         {
             int next = getch();
-            if (next == 't') current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 1) % 5);
-            else if (next == 'T') current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 4) % 5);
+            if (next == 't') current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 1) % 4);
+            else if (next == 'T') current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 3) % 4);
             break;
         }
 
         case KEY_BTAB:
-            current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 4) % 5);
+            current_tab = static_cast<Tab>((static_cast<int>(current_tab) + 3) % 4);
             break;
 
         case '1': current_tab = Tab::Dashboard; break;
-        case '2': current_tab = Tab::Projects;  break;
+        case '2': current_tab = Tab::Roadmap;   break;
         case '3': current_tab = Tab::Slots;     break;
-        case '4': current_tab = Tab::Roadmap;   break;
-        case '5': current_tab = Tab::Cluster;   break;
+        case '4': current_tab = Tab::Cluster;   break;
+
+        // ── Global search focus ────────────────────────────────────────────────
+        case '/':
+            search.focus = true;
+            search.sel   = 0;
+            break;
 
         // ── Refresh data ──────────────────────────────────────────────────────
         case 'r': case 'R':
@@ -1014,6 +1214,12 @@ int main(int argc, char* argv[]) {
         {
             if (current_tab == Tab::Dashboard) {
                 dash_inspect = !dash_inspect;
+                break;
+            }
+
+            if (current_tab == Tab::Cluster) {
+                if (cluster_sel >= 0)
+                    open_user_profile(cluster_room, cluster_sel);
                 break;
             }
 
@@ -1046,15 +1252,6 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            if (current_tab == Tab::Projects && proj_count > 0 &&
-                project_sel >= 0 && project_sel < proj_count) {
-                std::string proj_name;
-                {
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    proj_name = state.profile.projects[project_sel].name;
-                }
-                open_action_menu(proj_name);
-            }
             break;
         }
 
@@ -1062,7 +1259,7 @@ int main(int argc, char* argv[]) {
         case 'p':
         case 'P':
         {
-            if (current_tab == Tab::Projects || current_tab == Tab::Roadmap) {
+            if (current_tab == Tab::Roadmap) {
                 std::string name = selected_project_name();
                 std::string pdf;
                 if (!name.empty() && pdf_preview::subject_pdf_path(name, pdf)) {
@@ -1088,13 +1285,6 @@ int main(int argc, char* argv[]) {
                 }
                 std::string sub_ids = !s.ids.empty() ? s.ids : s.id;
                 worker.enqueue({ NetTaskKind::TrimSlot15m, s.id, sub_ids, s.begin_at, s.end_at });
-            } else if (current_tab == Tab::Projects && proj_count > 0 && project_sel >= 0 && project_sel < proj_count) {
-                std::string proj_name;
-                {
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    proj_name = state.profile.projects[project_sel].name;
-                }
-                worker.enqueue({ NetTaskKind::DownloadSubject, proj_name, "" });
             } else if (current_tab == Tab::Roadmap) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 int cur_idx = 0;
@@ -1142,17 +1332,10 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // ── 's': Add slot (Slots/Dashboard) or Download Subject (Projects/Roadmap)
+        // ── 's': Add slot (Slots/Dashboard) or Download Subject (Roadmap)
         case 's': case 'S':
         {
-            if (current_tab == Tab::Projects && proj_count > 0 && project_sel >= 0 && project_sel < proj_count) {
-                std::string proj_name;
-                {
-                    std::lock_guard<std::mutex> lk(state.mtx);
-                    proj_name = state.profile.projects[project_sel].name;
-                }
-                worker.enqueue({ NetTaskKind::DownloadSubject, proj_name, "" });
-            } else if (current_tab == Tab::Roadmap) {
+            if (current_tab == Tab::Roadmap) {
                 std::lock_guard<std::mutex> lk(state.mtx);
                 int cur_idx = 0;
                 for (size_t m = 0; m < state.profile.roadmap.size(); ++m) {
