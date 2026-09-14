@@ -152,6 +152,12 @@ private:
     MinimapBox          minimap_hover_box_;
     int                 minimap_hover_ = -1;
 
+    // Avatar box for the full-screen user profile modal, so the image renderer
+    // can place the viewed user's photo inside its frame (and suppress the base
+    // dashboard/cluster photos while the modal is open).
+    ImageBox            user_modal_avatar_box_;
+    std::string         user_modal_avatar_key_;
+
     int cols_{80};
     int rows_{24};
 };

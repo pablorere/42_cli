@@ -47,6 +47,29 @@ Optional install prefix:
 make install PREFIX=$HOME/.local
 ```
 
+## Update & run
+
+Pull the latest code, do a full rebuild, install and launch in a new terminal
+window (background):
+
+```bash
+make update
+```
+
+- If there are local changes or unpushed commits, they are saved to a backup
+  branch. When `masterbak` already exists you are asked whether to overwrite it
+  (`s`) or keep a timestamped backup (`c`), then `main` is reset to `origin/main`
+  and fast-forward pulled.
+- Then it runs `fclean`, `install` and opens `42_cli` in a new Ghostty window
+  (falls back to another terminal emulator, overridable with
+  `make update UPDATE_TERMINAL=kitty UPDATE_LAUNCH=-e`).
+
+Launch the installed binary without updating:
+
+```bash
+make run
+```
+
 ## CLI options
 
 ```text

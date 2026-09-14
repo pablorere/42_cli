@@ -344,6 +344,8 @@ void Renderer::draw(SharedState& state, Tab current_tab,
     preview_img_ = ImageBox{};
     minimap_hover_ = minimap_hover;
     minimap_hover_box_ = MinimapBox{};
+    user_modal_avatar_box_ = ImageBox{};
+    user_modal_avatar_key_.clear();
 
     // Not enough room to lay out anything meaningful — tell the user instead of
     // rendering a crushed interface.
@@ -449,31 +451,46 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                                   preview_img_.w, preview_img_.h});
         }
 
-        int card_bottom = content_bottom;
-        if (current_tab == Tab::Dashboard) {
-            int map_rows = reserve_map_rows(content_top, content_bottom);
-            if (map_rows > 0) card_bottom = content_bottom - map_rows;
-        }
-        int avail_h = card_bottom - content_top;
-        if (avail_h >= 20 && left_w >= 24 && !prof.avatar_url.empty()) {
-            int avatar_h = (avail_h >= 24) ? 7 : 6;
-            placements.push_back({prof.avatar_url, content_top + 2, 3,
-                                  left_w - 6, avatar_h - 1});
-        }
+        // Full-screen overlays hide the base dashboard/cluster photos so they
+        // never float on top of the modal.
+        const bool suppress_base = user_modal_open || subject_modal;
 
-        if (current_tab == Tab::Cluster && cluster_sel >= 0 && !prof.cluster_students.empty()) {
-            int sel_r = cluster_layout::row_of(cluster_sel);
-            int sel_s = cluster_layout::seat_of(cluster_sel);
-            const auto* cs = get_student_at_desk(prof.cluster_students, cluster_room, sel_r, sel_s);
-            if (cs && !cs->cdn_uri.empty()) {
-                const int card_h = 10;
-                const int drow   = content_bottom - card_h;
-                ClusterPhotoBox box = cluster_photo_box(left_w, cols_ - left_w, drow, card_h);
-                if (box.visible) {
-                    placements.push_back({cs->cdn_uri, box.pfy + 1, box.pfx + 1,
-                                          box.pfw - 2, box.pfh - 1});
+        if (!suppress_base) {
+            int card_bottom = content_bottom;
+            if (current_tab == Tab::Dashboard) {
+                int map_rows = reserve_map_rows(content_top, content_bottom);
+                if (map_rows > 0) card_bottom = content_bottom - map_rows;
+            }
+            int avail_h = card_bottom - content_top;
+            if (avail_h >= 20 && left_w >= 24 && !prof.avatar_url.empty()) {
+                int avatar_h = (avail_h >= 24) ? 7 : 6;
+                placements.push_back({prof.avatar_url, content_top + 2, 3,
+                                      left_w - 6, avatar_h - 1});
+            }
+
+            if (current_tab == Tab::Cluster && cluster_sel >= 0 && !prof.cluster_students.empty()) {
+                int sel_r = cluster_layout::row_of(cluster_sel);
+                int sel_s = cluster_layout::seat_of(cluster_sel);
+                const auto* cs = get_student_at_desk(prof.cluster_students, cluster_room, sel_r, sel_s);
+                if (cs && !cs->cdn_uri.empty()) {
+                    const int card_h = 10;
+                    const int drow   = content_bottom - card_h;
+                    ClusterPhotoBox box = cluster_photo_box(left_w, cols_ - left_w, drow, card_h);
+                    if (box.visible) {
+                        placements.push_back({cs->cdn_uri, box.pfy + 1, box.pfx + 1,
+                                              box.pfw - 2, box.pfh - 1});
+                    }
                 }
             }
+        }
+
+        // The user profile modal shows the viewed student's own photo.
+        if (user_modal_open && user_modal_avatar_box_.visible &&
+            !user_modal_avatar_key_.empty() &&
+            image_renderer::has_image(user_modal_avatar_key_)) {
+            placements.push_back({user_modal_avatar_key_,
+                                  user_modal_avatar_box_.row, user_modal_avatar_box_.col,
+                                  user_modal_avatar_box_.w, user_modal_avatar_box_.h});
         }
 
         std::string sig;
@@ -3145,6 +3162,11 @@ void Renderer::draw_user_modal(
     hline_box(top + av_h + 1, lx + 1, av_w);
     mvaddstr(top + av_h + 1, lx + av_w + 1, bc.br);
     attroff(COLOR_PAIR(CP_BORDER));
+
+    // Remember the avatar frame interior so draw() can place the real photo
+    // there (and hide the base dashboard/cluster photos behind the modal).
+    user_modal_avatar_box_ = ImageBox{top + 1, lx + 1, av_w, av_h, true};
+    user_modal_avatar_key_ = up.avatar_url;
 
     if (up.avatar_url.empty() || !image_renderer::has_image(up.avatar_url)) {
         attron(COLOR_PAIR(CP_DIM));
