@@ -112,6 +112,7 @@ bool Config::load(const std::string& path) {
             try {
                 if (key == "offset_minutes") offset_minutes = std::stoi(val);
                 else if (key == "default_duration") default_duration = std::stoi(val);
+                else if (key == "slot_gap_minutes") slot_gap_minutes = std::stoi(val);
             } catch (...) {}
         } else if (current_section == "network") {
             if (key == "timeout") {
@@ -156,7 +157,8 @@ bool Config::save(const std::string& path) {
 
     out << "[slots]\n";
     out << "offset_minutes = " << offset_minutes << "\n";
-    out << "default_duration = " << default_duration << "\n\n";
+    out << "default_duration = " << default_duration << "\n";
+    out << "slot_gap_minutes = " << slot_gap_minutes << "\n\n";
 
     out << "[network]\n";
     out << "timeout = " << timeout << "\n";
@@ -224,6 +226,11 @@ void Config::apply_env_overrides() {
     const char* env_offset = std::getenv("INTRA_SLOT_OFFSET");
     if (env_offset && *env_offset) {
         try { offset_minutes = std::stoi(env_offset); } catch (...) {}
+    }
+
+    const char* env_gap = std::getenv("INTRA_SLOT_GAP");
+    if (env_gap && *env_gap) {
+        try { slot_gap_minutes = std::stoi(env_gap); } catch (...) {}
     }
 
     const char* env_timeout = std::getenv("INTRA_TIMEOUT");

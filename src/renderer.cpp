@@ -46,6 +46,11 @@ enum ColorPair {
     CP_BADGE_PASS   = 20,
     CP_BADGE_FAIL   = 21,
     CP_ACCENT       = 22,
+    // Filled pill badges: dark text on a saturated background.
+    CP_PILL_SUCCESS = 23,
+    CP_PILL_WARN    = 24,
+    CP_PILL_FAIL    = 25,
+    CP_PILL_ACCENT  = 26,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +92,7 @@ Renderer::Renderer() {
     keypad(stdscr, TRUE);
     curs_set(0);
     timeout(80);
+    set_escdelay(25);   // low-latency Esc (search → modal → menu layering)
 
     // Enable mouse reporting (clicks, scroll wheel + motion for hover).
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
@@ -152,6 +158,17 @@ static std::string pad(const std::string& s, int w) {
     if ((int)s.size() >= w) return s.substr(0, w);
     return s + std::string(w - s.size(), ' ');
 }
+
+// Draw a filled "pill" badge: ` text ` with a dark-on-colour background pair.
+static void draw_pill(int row, int x, const std::string& text, int cp) {
+    std::string s = " " + text + " ";
+    attron(COLOR_PAIR(cp) | A_BOLD);
+    mvaddstr(row, x, s.c_str());
+    attroff(COLOR_PAIR(cp) | A_BOLD);
+}
+
+// Defined later in the file; used by the slot-manager overlays below.
+static void draw_modal_frame(int by, int bx, int box_h, int box_w, const std::string& title);
 
 static std::string normalize_host(const std::string& h) {
     std::string clean;
@@ -242,6 +259,25 @@ static std::string slot_duration_label(const std::string& begin, const std::stri
     return std::to_string(mins) + " min";
 }
 
+// Numeric duration in minutes between two ISO timestamps (0 if malformed).
+static int slot_duration_minutes(const std::string& begin, const std::string& end) {
+    if (begin.size() < 16 || end.size() < 16) return 0;
+    int bh = std::atoi(begin.substr(11, 2).c_str());
+    int bm = std::atoi(begin.substr(14, 2).c_str());
+    int eh = std::atoi(end.substr(11, 2).c_str());
+    int em = std::atoi(end.substr(14, 2).c_str());
+    int mins = (eh * 60 + em) - (bh * 60 + bm);
+    return mins > 0 ? mins : 0;
+}
+
+// "2h 30m" style compact total from a raw minute count.
+static std::string minutes_label(int mins) {
+    if (mins <= 0) return "0m";
+    if (mins % 60 == 0) return std::to_string(mins / 60) + "h";
+    if (mins > 60) return std::to_string(mins / 60) + "h " + std::to_string(mins % 60) + "m";
+    return std::to_string(mins) + "m";
+}
+
 // Rows reserved for the dashboard minimap panel (border + 8 grid rows + border).
 // Only granted when the student card keeps a usable minimum height.
 static int reserve_map_rows(int top, int bottom) {
@@ -327,7 +363,7 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                     const std::string& login_buf, const std::string& pass_buf,
                     const std::string& cookie_buf, const std::string& detected_file,
                     bool theme_switcher_open, int theme_sel,
-                    int dash_subview, int dash_sel, bool dash_inspect,
+                    bool dash_inspect, int dash_scroll, int minimap_room,
                     int cluster_room,
                     bool preview_panel,
                     const SubjectPreview& preview,
@@ -337,6 +373,9 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                     const std::vector<std::pair<std::string, bool>>& action_items,
                     int action_sel,
                     int minimap_hover,
+                    int slot_hover,
+                    int slot_btn_hover,
+                    const SlotUiState& slot_ui,
                     bool user_modal_open,
                     const std::string& user_modal_login,
                     const SearchState& search,
@@ -391,10 +430,12 @@ void Renderer::draw(SharedState& state, Tab current_tab,
 
         switch (current_tab) {
             case Tab::Dashboard:
-                draw_dashboard(prof, dash_subview, dash_sel, dash_inspect, content_top, content_bottom, left_w);
+                draw_dashboard(prof, dash_inspect, dash_scroll, minimap_room,
+                               content_top, content_bottom, left_w);
                 break;
             case Tab::Slots:
-                draw_slots(prof, slot_sel, content_top, content_bottom, left_w);
+                draw_slots(prof, slot_sel, slot_hover, slot_btn_hover,
+                           content_top, content_bottom, left_w);
                 break;
             case Tab::Roadmap:
                 draw_roadmap(prof, tree_sel, content_top, content_bottom, left_w,
@@ -436,6 +477,20 @@ void Renderer::draw(SharedState& state, Tab current_tab,
     if (!login_mode && user_modal_open && !user_modal_login.empty()) {
         curs_set(0);
         draw_user_modal(prof, cluster_profiles, user_modal_login);
+    }
+
+    // Slot manager overlays: context menu first, then the free-space picker on top.
+    if (!login_mode && data_ready && current_tab == Tab::Slots &&
+        !theme_switcher_open && !subject_modal && !action_menu_open && !user_modal_open &&
+        menu.page == MenuPage::None && !search.focus) {
+        if (slot_ui.ctx_open) {
+            curs_set(0);
+            draw_slot_context_menu(slot_ui);
+        }
+        if (slot_ui.gap_picker_open) {
+            curs_set(0);
+            draw_gap_picker(slot_ui.gap_minutes);
+        }
     }
 
     // Esc menu (drawn above the base screen; theme chooser wins if both are up).
@@ -716,7 +771,7 @@ void Renderer::draw_status_bar(const std::string& login,
     if (current_tab == Tab::Dashboard)
         hints = " [/]:Subviews  j/k:Nav  Enter/f:Inspect  r:Sync  t:Theme  q:Quit ";
     else if (current_tab == Tab::Slots)
-        hints = " j/k:Sel  s:Nuevo slot  d:Quitar 15m  D:Borrar  t:Tema  q:Salir ";
+        hints = i18n::tr("hint_slots");
     else if (current_tab == Tab::Roadmap)
         hints = " j/k:Nav  Enter:Actions  p:Preview  d/s:PDF  t:Theme  q:Quit ";
     else if (current_tab == Tab::Cluster)
@@ -957,12 +1012,13 @@ void Renderer::draw_profile_panel(const Profile& p, int top, int bottom, int pan
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab 1: Dashboard
 // ─────────────────────────────────────────────────────────────────────────────
-void Renderer::draw_dashboard(const Profile& p, int subview, int sel, bool inspect, int top, int bottom, int left_w) {
+void Renderer::draw_dashboard(const Profile& p, bool inspect, int scroll, int minimap_room,
+                              int top, int bottom, int left_w) {
     int map_rows    = reserve_map_rows(top, bottom);
     int card_bottom = (map_rows > 0) ? bottom - map_rows : bottom;
     draw_profile_panel(p, top, card_bottom, left_w);
     if (map_rows > 0)
-        draw_cluster_minimap(p, card_bottom + 1, bottom, left_w, minimap_hover_);
+        draw_cluster_minimap(p, card_bottom + 1, bottom, left_w, minimap_hover_, minimap_room);
 
     int rx = left_w;
     int rw = cols_ - rx;
@@ -978,578 +1034,322 @@ void Renderer::draw_dashboard(const Profile& p, int subview, int sel, bool inspe
     hline_box(bottom, rx, rw - 1);
     attroff(COLOR_PAIR(CP_BORDER));
 
-    int row = top;
+    auto fmt_d = [](std::string s, int n) {
+        auto pos = s.find("%d");
+        if (pos != std::string::npos) s.replace(pos, 2, std::to_string(n));
+        return s;
+    };
 
-    // Sub-menu Navigation Strip
+    int pending = p.pending_feedbacks_count;
+    for (const auto& fb : p.feedbacks)
+        if (fb.is_pending) { pending = std::max(pending, 1); break; }
+
+    // ── Fixed header ─────────────────────────────────────────────────────────
+    std::string title = "◆ " + i18n::tr("dash_title");
+    attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    mvprint_clip(top, rx + 2, title, rw - 4);
+    attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    if (pending > 0)
+        draw_pill(top, rx + rw - 16, "⚠ " + std::to_string(pending) + " " + i18n::tr("stat_pending"), CP_PILL_WARN);
+
+    // ── Scrollable content ───────────────────────────────────────────────────
+    const int vtop    = top + 2;   // first content row
+    const int vbottom = bottom;    // exclusive
+    int crow = vtop;
+
+    auto sy  = [&](int vr) { return vr - scroll; };
+    auto vis = [&](int vr) { int s = vr - scroll; return s >= vtop && s < vbottom; };
+
+    // Boxed card with a filled title bar. `body_h` = body rows inside the card.
+    auto card_frame = [&](int v, const std::string& ct, int body_h) {
+        int total = body_h + 3;   // top border + title bar + body + bottom border
+        for (int i = 0; i < total; ++i) {
+            if (!vis(v + i)) continue;
+            int y = sy(v + i);
+            if (i == 0) {
+                attron(COLOR_PAIR(CP_BORDER));
+                mvaddstr(y, rx + 2, bc.tl);
+                hline_box(y, rx + 3, rw - 6);
+                mvaddstr(y, rx + rw - 3, bc.tr);
+                attroff(COLOR_PAIR(CP_BORDER));
+            } else if (i == total - 1) {
+                attron(COLOR_PAIR(CP_BORDER));
+                mvaddstr(y, rx + 2, bc.bl);
+                hline_box(y, rx + 3, rw - 6);
+                mvaddstr(y, rx + rw - 3, bc.br);
+                attroff(COLOR_PAIR(CP_BORDER));
+            } else {
+                attron(COLOR_PAIR(CP_BORDER));
+                mvaddstr(y, rx + 2, bc.v);
+                mvaddstr(y, rx + rw - 3, bc.v);
+                attroff(COLOR_PAIR(CP_BORDER));
+                attron(COLOR_PAIR(CP_MODAL_BG));
+                fill_row(y, rx + 3, rw - 6);
+                attroff(COLOR_PAIR(CP_MODAL_BG));
+            }
+        }
+        if (vis(v + 1)) {
+            int y = sy(v + 1);
+            attron(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
+            fill_row(y, rx + 3, rw - 6);
+            mvprint_clip(y, rx + 4, ct, rw - 8);
+            attroff(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
+        }
+    };
+    auto put = [&](int vr, int xoff, const std::string& s, int cp, int attr = 0) {
+        if (!vis(vr)) return;
+        attron(COLOR_PAIR(cp) | attr);
+        mvprint_clip(sy(vr), rx + 4 + xoff, s, rw - 8 - xoff);
+        attroff(COLOR_PAIR(cp) | attr);
+    };
+
+    // ── 1. Summary strip ─────────────────────────────────────────────────────
     {
-        attron(COLOR_PAIR(CP_BORDER));
-        mvprintw(row, rx + 2, "%s─ VIEW: ", bc.tl);
-        attroff(COLOR_PAIR(CP_BORDER));
-
-        struct SubViewDef { int id; const char* name; };
-        const SubViewDef subviews[] = {
-            { 0, "[1: Overview]" },
-            { 1, "[2: Scale Teams]" },
-            { 2, "[3: Points & Pool]" }
-        };
-
-        int sx = rx + 12;
-        for (const auto& sv : subviews) {
-            bool active = (sv.id == subview);
-            add_hitbox(row, sx, 1, (int)strlen(sv.name), MouseAction::DashSubview, sv.id);
-            if (active) {
-                attron(COLOR_PAIR(CP_TAB_ACTIVE) | A_BOLD);
-            } else {
+        int v = crow;
+        if (vis(v)) {
+            int y = sy(v);
+            attron(COLOR_PAIR(CP_BORDER));
+            mvaddstr(y, rx + 2, bc.tl); hline_box(y, rx + 3, rw - 6); mvaddstr(y, rx + rw - 3, bc.tr);
+            attroff(COLOR_PAIR(CP_BORDER));
+        }
+        if (vis(v + 1)) {
+            int y = sy(v + 1);
+            attron(COLOR_PAIR(CP_BORDER));
+            mvaddstr(y, rx + 2, bc.v); mvaddstr(y, rx + rw - 3, bc.v);
+            attroff(COLOR_PAIR(CP_BORDER));
+            attron(COLOR_PAIR(CP_MODAL_BG)); fill_row(y, rx + 3, rw - 6); attroff(COLOR_PAIR(CP_MODAL_BG));
+            int sx = rx + 4;
+            auto st = [&](const std::string& lbl, const std::string& val, int cp) {
                 attron(COLOR_PAIR(CP_DIM));
-            }
-            mvprintw(row, sx, "%s", sv.name);
-            if (active) {
-                attroff(COLOR_PAIR(CP_TAB_ACTIVE) | A_BOLD);
-            } else {
+                mvprint_clip(y, sx, lbl + " ", rw - (sx - rx) - 2);
                 attroff(COLOR_PAIR(CP_DIM));
-            }
-            sx += (int)strlen(sv.name) + 2;
+                sx += (int)lbl.size() + 1;
+                attron(COLOR_PAIR(cp) | A_BOLD);
+                mvprint_clip(y, sx, val, rw - (sx - rx) - 2);
+                attroff(COLOR_PAIR(cp) | A_BOLD);
+                sx += (int)val.size() + 3;
+            };
+            st(i18n::tr("stat_level"), p.level.empty() ? "—" : p.level, CP_SUCCESS);
+            st(i18n::tr("stat_wallet"), (p.wallet.empty() ? "0" : p.wallet) + "₳", CP_WARN);
+            st(i18n::tr("stat_eval"), p.correction_points.empty() ? "0" : p.correction_points, CP_SUCCESS);
+            st(i18n::tr("stat_seat"), p.location.empty() ? "—" : p.location, CP_VALUE);
+            st(i18n::tr("stat_slots"), std::to_string(p.slots.size()), CP_VALUE);
+            st(i18n::tr("stat_pending"), std::to_string(pending), pending > 0 ? CP_WARN : CP_DIM);
         }
-
-        attron(COLOR_PAIR(CP_BORDER));
-        mvprintw(row, sx, "─%s", bc.tr);
-        attroff(COLOR_PAIR(CP_BORDER));
-
-        attron(COLOR_PAIR(CP_DIM));
-        if (cols_ - 26 > sx + 1) {
-            mvprintw(row, cols_ - 26, "([/] to cycle subviews)");
+        if (vis(v + 2)) {
+            int y = sy(v + 2);
+            attron(COLOR_PAIR(CP_BORDER));
+            mvaddstr(y, rx + 2, bc.bl); hline_box(y, rx + 3, rw - 6); mvaddstr(y, rx + rw - 3, bc.br);
+            attroff(COLOR_PAIR(CP_BORDER));
         }
-        attroff(COLOR_PAIR(CP_DIM));
-
-        row += 2;
+        crow += 4;
     }
 
-    if (subview == 0) {
-        // ─────────────────────────────────────────────────────────────────────
-        // SUBVIEW 0: OVERVIEW
-        // ─────────────────────────────────────────────────────────────────────
-
-        // 1. Cursus Level & Progress Hero Card
-        {
-            int card_h = 4;
-            attron(COLOR_PAIR(CP_BORDER));
-            mvaddstr(row, rx + 2, bc.tl);
-            hline_box(row, rx + 3, rw - 6);
-            mvaddstr(row, rx + rw - 3, bc.tr);
-
-            for (int ch = 1; ch < card_h; ++ch) {
-                mvaddstr(row + ch, rx + 2, bc.v);
-                fill_row(row + ch, rx + 3, rw - 6);
-                mvaddstr(row + ch, rx + rw - 3, bc.v);
-            }
-
-            mvaddstr(row + card_h, rx + 2, bc.bl);
-            hline_box(row + card_h, rx + 3, rw - 6);
-            mvaddstr(row + card_h, rx + rw - 3, bc.br);
-            attroff(COLOR_PAIR(CP_BORDER));
-
+    // ── 2. Cursus level ──────────────────────────────────────────────────────
+    {
+        int v = crow;
+        card_frame(v, "◆ " + i18n::tr("cursus_title") + "  " + p.level, 1);
+        if (vis(v + 2)) {
+            int y = sy(v + 2);
             float lvl = 0.f;
             try { lvl = std::stof(p.level); } catch (...) {}
             float frac = lvl - static_cast<int>(lvl);
             if (frac < 0.f) frac = 0.f;
             if (frac > 1.f) frac = 1.f;
-
-            // Line 1: Header
-            attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-            mvprintw(row + 1, rx + 4, "◆ 42 CURSUS LEVEL: %s", p.level.c_str());
-            attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_VALUE));
-            std::string quick_stats = "Wallet: " + (p.wallet.empty() ? "0" : p.wallet) + " ₳  │  Eval Points: " + 
-                                      (p.correction_points.empty() ? "0" : p.correction_points) + "  │  Seat: " + 
-                                      (p.location.empty() ? "—" : p.location);
-            mvprint_clip(row + 1, rx + 30, quick_stats, rw - 34);
-            attroff(COLOR_PAIR(CP_VALUE));
-
-            // Line 2: Progress bar in theme colors
-            int bar_w = rw - 24;
-            if (bar_w > 10) {
+            int bar_w = rw - 20;
+            if (bar_w > 8) {
                 int filled = static_cast<int>(frac * bar_w);
-                mvaddstr(row + 2, rx + 4, "Progress: [");
-                attron(COLOR_PAIR(CP_PROGRESS) | A_BOLD);
-                for (int i = 0; i < filled; ++i) mvaddstr(row + 2, rx + 15 + i, "█");
-                attroff(COLOR_PAIR(CP_PROGRESS) | A_BOLD);
-
                 attron(COLOR_PAIR(CP_DIM));
-                for (int i = filled; i < bar_w; ++i) mvaddstr(row + 2, rx + 15 + i, "░");
+                mvaddstr(y, rx + 4, "Progress: [");
                 attroff(COLOR_PAIR(CP_DIM));
-                mvaddch(row + 2, rx + 15 + bar_w, ']');
-
-                char pct_str[16];
-                snprintf(pct_str, sizeof(pct_str), " %d%%", (int)(frac * 100.f));
+                attron(COLOR_PAIR(CP_PROGRESS) | A_BOLD);
+                for (int i = 0; i < filled; ++i) mvaddstr(y, rx + 15 + i, "█");
+                attroff(COLOR_PAIR(CP_PROGRESS) | A_BOLD);
+                attron(COLOR_PAIR(CP_DIM));
+                for (int i = filled; i < bar_w; ++i) mvaddstr(y, rx + 15 + i, "░");
+                attroff(COLOR_PAIR(CP_DIM));
+                mvaddch(y, rx + 15 + bar_w, ']');
                 attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-                mvprintw(row + 2, rx + 17 + bar_w, "%s", pct_str);
+                mvprintw(y, rx + 17 + bar_w, "%d%%", static_cast<int>(frac * 100.f));
                 attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
             }
+        }
+        crow += 5;
+    }
 
-            // Line 3: Active Slots summary
+    // ── 3. Action center ─────────────────────────────────────────────────────
+    if (pending > 0) {
+        int v = crow;
+        card_frame(v, "⚠ " + i18n::tr("dash_action_title"), 1);
+        if (vis(v + 2)) {
+            int y = sy(v + 2);
+            put(v + 2, 0, fmt_d(i18n::tr("dash_action_msg"), pending), CP_VALUE);
+            std::string rv = " " + i18n::tr("review") + " ";
+            int bx = rx + rw - 3 - (int)rv.size();
+            if (bx > rx + 4) {
+                add_hitbox(y, bx, 1, (int)rv.size(), MouseAction::DashReview, 0);
+                attron(COLOR_PAIR(CP_PILL_ACCENT) | A_BOLD);
+                mvaddstr(y, bx, rv.c_str());
+                attroff(COLOR_PAIR(CP_PILL_ACCENT) | A_BOLD);
+            }
+        }
+        crow += 5;
+    }
+
+    // ── 4. Recent submissions ────────────────────────────────────────────────
+    {
+        int count = std::min((int)p.projects.size(), 6);
+        int body_h = (count == 0) ? 2 : count + 1;
+        int v = crow;
+        card_frame(v, "◆ " + i18n::tr("recent_submissions"), body_h);
+        if (vis(v + 2)) {
+            int y = sy(v + 2);
             attron(COLOR_PAIR(CP_DIM));
-            std::string slots_summary = "Active Slots: " + std::to_string(p.slots.size()) + " available  │  Safety offset: +" + std::to_string(Config::get().offset_minutes) + "m";
-            mvprint_clip(row + 3, rx + 4, slots_summary, rw - 8);
+            mvprint_clip(y, rx + 4, "#  " + i18n::tr("hdr_project"), 20);
+            mvprint_clip(y, rx + rw - 26, i18n::tr("hdr_grade"), 6);
+            mvprint_clip(y, rx + rw - 18, i18n::tr("hdr_status"), 14);
             attroff(COLOR_PAIR(CP_DIM));
-
-            row += card_h + 1;
         }
-
-        // 2. Correction Points & Economics Card
-        {
-            int card_h = 3;
-            attron(COLOR_PAIR(CP_BORDER));
-            mvaddstr(row, rx + 2, bc.tl);
-            hline_box(row, rx + 3, rw - 6);
-            mvaddstr(row, rx + rw - 3, bc.tr);
-
-            for (int ch = 1; ch < card_h; ++ch) {
-                mvaddstr(row + ch, rx + 2, bc.v);
-                fill_row(row + ch, rx + 3, rw - 6);
-                mvaddstr(row + ch, rx + rw - 3, bc.v);
-            }
-
-            mvaddstr(row + card_h, rx + 2, bc.bl);
-            hline_box(row + card_h, rx + 3, rw - 6);
-            mvaddstr(row + card_h, rx + rw - 3, bc.br);
-            attroff(COLOR_PAIR(CP_BORDER));
-
-            attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-            mvprintw(row, rx + 4, " CORRECTION POINTS METRICS ");
-            attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            // Row 1: Balance & evaluation rights
-            attron(COLOR_PAIR(CP_LABEL));
-            mvprintw(row + 1, rx + 4, "Balance: ");
-            attroff(COLOR_PAIR(CP_LABEL));
-
-            attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-            std::string pts_str = (p.correction_points.empty() ? "0" : p.correction_points) + " Points";
-            mvprintw(row + 1, rx + 13, "%-12s", pts_str.c_str());
-            attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_VALUE));
-            std::string elig = "✔ Can request up to " + (p.correction_points.empty() ? "0" : p.correction_points) + " peer project evaluations";
-            mvprint_clip(row + 1, rx + 28, elig, rw - 32);
-            attroff(COLOR_PAIR(CP_VALUE));
-
-            // Row 2: Economics
-            attron(COLOR_PAIR(CP_DIM));
-            std::string econ = "Economics: +1 pt earned per evaluation given  │  -1 pt per project submission  │  Pool: Healthy";
-            mvprint_clip(row + 2, rx + 4, econ, rw - 8);
-            attroff(COLOR_PAIR(CP_DIM));
-
-            row += card_h + 1;
-        }
-
-        // 3. Notification / Action Center
-        bool has_pending = (p.pending_feedbacks_count > 0);
-        const EvaluationFeedback* pending_fb = nullptr;
-        for (const auto& fb : p.feedbacks) {
-            if (fb.is_pending) {
-                has_pending = true;
-                pending_fb = &fb;
-                break;
-            }
-        }
-        if (!pending_fb && !p.feedbacks.empty() && p.pending_feedbacks_count > 0) {
-            pending_fb = &p.feedbacks.front();
-        }
-
-        if (has_pending) {
-            int card_h = 3;
-            attron(COLOR_PAIR(CP_WARN));
-            mvaddstr(row, rx + 2, bc.tl);
-            hline_box(row, rx + 3, rw - 6);
-            mvaddstr(row, rx + rw - 3, bc.tr);
-
-            for (int ch = 1; ch < card_h; ++ch) {
-                mvaddstr(row + ch, rx + 2, bc.v);
-                fill_row(row + ch, rx + 3, rw - 6);
-                mvaddstr(row + ch, rx + rw - 3, bc.v);
-            }
-
-            mvaddstr(row + card_h, rx + 2, bc.bl);
-            hline_box(row + card_h, rx + 3, rw - 6);
-            mvaddstr(row + card_h, rx + rw - 3, bc.br);
-            attroff(COLOR_PAIR(CP_WARN));
-
-            attron(COLOR_PAIR(CP_WARN) | A_BOLD);
-            mvprintw(row, rx + 4, " 🔔 ACTION REQUIRED ");
-            attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_WARN) | A_BOLD);
-            std::string action_title = "▶ " + std::to_string(std::max(1, p.pending_feedbacks_count)) + " Evaluation Feedback Pending";
-            if (pending_fb && !pending_fb->project_name.empty()) {
-                action_title += ": " + pending_fb->project_name;
-                if (!pending_fb->evaluator_login.empty()) {
-                    action_title += " with @" + pending_fb->evaluator_login;
-                }
-            }
-            mvprint_clip(row + 1, rx + 4, action_title, rw - 8);
-            attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_VALUE));
-            mvprint_clip(row + 2, rx + 4, "Press [Enter] or [f] to inspect feedback critique & rating breakdown", rw - 8);
-            attroff(COLOR_PAIR(CP_VALUE));
-
-            row += card_h + 1;
-        } else {
-            attron(COLOR_PAIR(CP_SUCCESS));
-            mvprintw(row, rx + 2, "● Notifications: All evaluation feedbacks completed (Sync with [r])");
-            attroff(COLOR_PAIR(CP_SUCCESS));
-            row += 2;
-        }
-
-        // 4. Recent Project Submissions Table Header
-        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        mvprintw(row, rx + 2, "◆ Recent Project Submissions");
-        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        row++;
-
-        attron(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
-        fill_row(row, rx + 2, rw - 4);
-        std::string hdr = pad(" #  PROJECT", rw - 26) + pad("GRADE", 10) + "STATUS";
-        mvprint_clip(row, rx + 2, hdr, rw - 4);
-        attroff(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
-        row++;
-
-        int count = 0;
+        int shown = 0;
         for (const auto& pr : p.projects) {
-            if (row >= bottom - 1) break;
-
+            if (shown >= 6) break;
+            int vr = v + 3 + shown;
+            if (!vis(vr)) { ++shown; continue; }
+            int y = sy(vr);
             bool ok   = (pr.status == "finished" && pr.grade != "N/A" && !pr.grade.empty());
             bool fail = (pr.status == "finished" && !ok);
             bool prog = (pr.status == "in_progress");
-
-            int cp = ok ? CP_SUCCESS : (fail ? CP_FAIL : (prog ? CP_IN_PROG : CP_WARN));
-
-            char idx_buf[16];
-            snprintf(idx_buf, sizeof(idx_buf), "%02d", count + 1);
-
-            std::string grade_str = pr.grade.empty() ? "N/A" : pr.grade;
-            std::string status_badge = ok ? "[FINISHED]" : (prog ? "[IN PROGRESS]" : "[" + pr.status + "]");
-
+            std::string badge = ok ? i18n::tr("status_pass")
+                                 : (prog ? i18n::tr("status_inprogress")
+                                         : (fail ? i18n::tr("status_fail") : i18n::tr("status_waiting")));
+            int pill_cp = ok ? CP_PILL_SUCCESS : (prog ? CP_PILL_WARN : (fail ? CP_PILL_FAIL : CP_DIM));
             attron(COLOR_PAIR(CP_DIM));
-            mvprintw(row, rx + 2, " %s ", idx_buf);
+            mvprint_clip(y, rx + 4, pad(std::to_string(shown + 1), 2), 3);
             attroff(COLOR_PAIR(CP_DIM));
-
             attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
-            mvprint_clip(row, rx + 6, pr.name, rw - 30);
+            mvprint_clip(y, rx + 9, pr.name, rw - 46);
             attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
-
-            attron(COLOR_PAIR(cp) | A_BOLD);
-            mvprintw(row, rx + rw - 22, "%-8s", grade_str.c_str());
-            mvprint_clip(row, rx + rw - 14, status_badge, 12);
-            attroff(COLOR_PAIR(cp) | A_BOLD);
-
-            row++;
-            count++;
+            std::string grade = pr.grade.empty() ? "N/A" : pr.grade;
+            attron(COLOR_PAIR(ok ? CP_SUCCESS : (prog ? CP_DIM : CP_FAIL)) | A_BOLD);
+            mvprint_clip(y, rx + rw - 26, grade, 6);
+            attroff(COLOR_PAIR(ok ? CP_SUCCESS : (prog ? CP_DIM : CP_FAIL)) | A_BOLD);
+            draw_pill(y, rx + rw - 18, badge, pill_cp);
+            ++shown;
         }
+        if (count == 0) put(v + 3, 0, "No projects loaded — press 'r' to sync.", CP_DIM);
+        crow += body_h + 4;
+    }
 
-        if (count == 0) {
+    // ── 5. Recent evaluations ────────────────────────────────────────────────
+    {
+        int count = std::min((int)p.feedbacks.size(), 5);
+        int body_h = (count == 0) ? 2 : count + 1;
+        int v = crow;
+        card_frame(v, "◆ " + i18n::tr("recent_evaluations"), body_h);
+        if (vis(v + 2)) {
+            int y = sy(v + 2);
             attron(COLOR_PAIR(CP_DIM));
-            mvprintw(row + 1, rx + 4, "No projects loaded. Press 'r' to sync data from intra.");
+            mvprint_clip(y, rx + 4, "#  " + i18n::tr("hdr_project"), 22);
+            mvprint_clip(y, rx + 30, i18n::tr("hdr_peer"), 14);
+            mvprint_clip(y, rx + rw - 24, i18n::tr("hdr_grade"), 6);
+            mvprint_clip(y, rx + rw - 15, i18n::tr("hdr_feedback"), 9);
             attroff(COLOR_PAIR(CP_DIM));
         }
-
-        // 5. Feedback Inspector Modal overlay if active
-        if (inspect) {
-            const EvaluationFeedback* target_fb = pending_fb;
-            if (!target_fb && !p.feedbacks.empty()) {
-                target_fb = &p.feedbacks.front();
-            }
-
-            int mw = std::min(rw - 4, 76);
-            int mh = std::min(bottom - top - 4, 16);
-            int mx = rx + (rw - mw) / 2;
-            int my = top + 3;
-
-            attron(COLOR_PAIR(CP_MODAL_BG));
-            for (int r = my; r <= my + mh; ++r) {
-                fill_row(r, mx, mw);
-            }
-            attroff(COLOR_PAIR(CP_MODAL_BG));
-
-            attron(COLOR_PAIR(CP_BORDER) | A_BOLD);
-            mvaddstr(my, mx, bc.tl);
-            hline_box(my, mx + 1, mw - 2);
-            mvaddstr(my, mx + mw - 1, bc.tr);
-
-            for (int r = my + 1; r < my + mh; ++r) {
-                mvaddstr(r, mx, bc.v);
-                mvaddstr(r, mx + mw - 1, bc.v);
-            }
-
-            mvaddstr(my + mh, mx, bc.bl);
-            hline_box(my + mh, mx + 1, mw - 2);
-            mvaddstr(my + mh, mx + mw - 1, bc.br);
-            attroff(COLOR_PAIR(CP_BORDER) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-            mvprintw(my, mx + 4, " 📋 EVALUATION FEEDBACK INSPECTOR ");
-            attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            if (target_fb) {
-                attron(COLOR_PAIR(CP_LABEL));
-                mvprintw(my + 2, mx + 3, "Project   :");
-                attroff(COLOR_PAIR(CP_LABEL));
-                attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
-                mvprintw(my + 2, mx + 16, "%s", target_fb->project_name.c_str());
-                attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
-
-                attron(COLOR_PAIR(CP_LABEL));
-                mvprintw(my + 3, mx + 3, "Evaluator :");
-                attroff(COLOR_PAIR(CP_LABEL));
-                attron(COLOR_PAIR(CP_VALUE));
-                mvprintw(my + 3, mx + 16, "@%s", target_fb->evaluator_login.empty() ? "peer" : target_fb->evaluator_login.c_str());
-                attroff(COLOR_PAIR(CP_VALUE));
-
-                attron(COLOR_PAIR(CP_LABEL));
-                mvprintw(my + 4, mx + 3, "Date & Mark:");
-                attroff(COLOR_PAIR(CP_LABEL));
-                attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-                mvprintw(my + 4, mx + 16, "%s  [Grade: %s]", target_fb->scheduled_at.empty() ? "Recent" : target_fb->scheduled_at.c_str(),
-                         target_fb->mark.empty() ? "Pending" : target_fb->mark.c_str());
-                attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-
-                attron(COLOR_PAIR(CP_LABEL));
-                mvprintw(my + 5, mx + 3, "Breakdown :");
-                attroff(COLOR_PAIR(CP_LABEL));
-                attron(COLOR_PAIR(CP_VALUE));
-                mvprint_clip(my + 5, mx + 16, target_fb->rating_breakdown.empty() ? "Nice: 4/4  Rigorous: 4/4  Interested: 4/4  Punctual: 4/4" : target_fb->rating_breakdown, mw - 19);
-                attroff(COLOR_PAIR(CP_VALUE));
-
-                attron(COLOR_PAIR(CP_LABEL));
-                mvprintw(my + 7, mx + 3, "Peer Review / Critique:");
-                attroff(COLOR_PAIR(CP_LABEL));
-
-                attron(COLOR_PAIR(CP_VALUE));
-                std::string comment = target_fb->comment.empty() ? "No written critique recorded." : target_fb->comment;
-                int crow = my + 8;
-                for (size_t i = 0; i < comment.size() && crow < my + mh - 2; i += mw - 8) {
-                    mvprint_clip(crow++, mx + 4, comment.substr(i, mw - 8), mw - 8);
-                }
-                attroff(COLOR_PAIR(CP_VALUE));
-
-                if (!target_fb->feedback_comment.empty()) {
-                    attron(COLOR_PAIR(CP_LABEL));
-                    mvprint_clip(crow, mx + 3, "Student Feedback: " + target_fb->feedback_comment, mw - 6);
-                    attroff(COLOR_PAIR(CP_LABEL));
-                }
-            } else {
-                attron(COLOR_PAIR(CP_DIM));
-                mvprintw(my + 4, mx + 4, "No evaluation feedback record selected.");
-                attroff(COLOR_PAIR(CP_DIM));
-            }
-
-            attron(COLOR_PAIR(CP_BORDER));
-            hline_box(my + mh - 2, mx + 1, mw - 2);
-            attroff(COLOR_PAIR(CP_BORDER));
-
+        int shown = 0;
+        for (const auto& fb : p.feedbacks) {
+            if (shown >= 5) break;
+            int vr = v + 3 + shown;
+            if (!vis(vr)) { ++shown; continue; }
+            int y = sy(vr);
             attron(COLOR_PAIR(CP_DIM));
-            mvprintw(my + mh - 1, mx + 4, "Press [Enter] or [Esc] to close inspector");
+            mvprint_clip(y, rx + 4, pad(std::to_string(shown + 1), 2), 3);
             attroff(COLOR_PAIR(CP_DIM));
-        }
-
-    } else if (subview == 1) {
-        // ─────────────────────────────────────────────────────────────────────
-        // SUBVIEW 1: SCALE TEAMS & EVALUATIONS
-        // ─────────────────────────────────────────────────────────────────────
-        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        mvprintw(row, rx + 2, "◆ Campus Peer Evaluations & Scale Teams History");
-        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        row++;
-
-        // Table header
-        attron(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
-        fill_row(row, rx + 2, rw - 4);
-        std::string hdr = pad("   #  DATE", 16) + pad("PROJECT", 22) + pad("PEER", 16) + pad("GRADE", 10) + "FEEDBACK";
-        mvprint_clip(row, rx + 2, hdr, rw - 4);
-        attroff(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
-        row++;
-
-        int total_records = (int)p.feedbacks.size();
-        int max_items = std::max(1, (bottom - row - 7));
-        int safe_sel = std::clamp(sel, 0, std::max(0, total_records - 1));
-
-        int start_idx = 0;
-        if (safe_sel >= max_items) {
-            start_idx = safe_sel - max_items + 1;
-        }
-
-        for (int i = 0; i < max_items && (start_idx + i) < total_records; ++i) {
-            int idx = start_idx + i;
-            const auto& fb = p.feedbacks[idx];
-            bool is_active = (idx == safe_sel);
-            add_hitbox(row, rx + 2, 1, rw - 4, MouseAction::ListRow, idx);
-
-            int cp = is_active ? CP_ROW_SEL : ((idx % 2 == 0) ? CP_DEFAULT : CP_MODAL_BG);
-            attron(COLOR_PAIR(cp));
-            fill_row(row, rx + 2, rw - 4);
-
-            char num_buf[16];
-            snprintf(num_buf, sizeof(num_buf), "%02d", idx + 1);
-
-            std::string date_str = fb.scheduled_at.empty() ? "Recent" : fb.scheduled_at.substr(0, 10);
-            std::string line = (is_active ? "> " : "  ") + std::string(num_buf) + "  " +
-                               pad(date_str, 10) + "  " +
-                               pad(fb.project_name.empty() ? "Project" : fb.project_name, 20) + "  @" +
-                               pad(fb.evaluator_login.empty() ? "peer" : fb.evaluator_login, 13) + "  " +
-                               pad(fb.mark.empty() ? "N/A" : fb.mark, 8) + "  " +
-                               (fb.feedback_rating.empty() ? "★★★★★" : fb.feedback_rating);
-
-            mvprint_clip(row, rx + 2, line, rw - 4);
-            attroff(COLOR_PAIR(cp));
-            row++;
-        }
-
-        if (total_records == 0) {
-            attron(COLOR_PAIR(CP_DIM));
-            mvprintw(row + 1, rx + 4, "No evaluation history loaded. Press 'r' to sync from intra.");
-            attroff(COLOR_PAIR(CP_DIM));
-            row += 3;
-        }
-
-        // Detail preview pane at the bottom
-        int detail_top = bottom - 6;
-        if (detail_top > row) {
-            attron(COLOR_PAIR(CP_BORDER));
-            mvaddstr(detail_top, rx + 2, bc.tl);
-            hline_box(detail_top, rx + 3, rw - 6);
-            mvaddstr(detail_top, rx + rw - 3, bc.tr);
-            for (int r = detail_top + 1; r < bottom; ++r) {
-                mvaddstr(r, rx + 2, bc.v);
-                fill_row(r, rx + 3, rw - 6);
-                mvaddstr(r, rx + rw - 3, bc.v);
-            }
-            mvaddstr(bottom, rx + 2, bc.bl);
-            hline_box(bottom, rx + 3, rw - 6);
-            mvaddstr(bottom, rx + rw - 3, bc.br);
-            attroff(COLOR_PAIR(CP_BORDER));
-
-            attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-            mvprintw(detail_top, rx + 4, " EVALUATION DETAIL ");
-            attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            if (safe_sel >= 0 && safe_sel < total_records) {
-                const auto& cur = p.feedbacks[safe_sel];
-                attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
-                mvprintw(detail_top + 1, rx + 4, "Critique: %s", cur.comment.empty() ? "No written critique." : cur.comment.c_str());
-                attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
-
-                attron(COLOR_PAIR(CP_LABEL));
-                mvprintw(detail_top + 2, rx + 4, "Breakdown: ");
-                attroff(COLOR_PAIR(CP_LABEL));
-                attron(COLOR_PAIR(CP_SUCCESS));
-                mvprint_clip(detail_top + 2, rx + 15, cur.rating_breakdown.empty() ? "Nice: 4/4  Rigorous: 4/4  Interested: 4/4  Punctual: 4/4" : cur.rating_breakdown, rw - 20);
-                attroff(COLOR_PAIR(CP_SUCCESS));
-
-                if (!cur.feedback_comment.empty()) {
-                    attron(COLOR_PAIR(CP_DIM));
-                    mvprint_clip(detail_top + 3, rx + 4, "Student note: " + cur.feedback_comment, rw - 8);
-                    attroff(COLOR_PAIR(CP_DIM));
-                }
-            } else {
-                attron(COLOR_PAIR(CP_DIM));
-                mvprintw(detail_top + 2, rx + 4, "Select an evaluation row using j/k to view feedback notes");
-                attroff(COLOR_PAIR(CP_DIM));
-            }
-        }
-
-    } else if (subview == 2) {
-        // ─────────────────────────────────────────────────────────────────────
-        // SUBVIEW 2: CORRECTION POINTS & CAMPUS POOL ECONOMICS
-        // ─────────────────────────────────────────────────────────────────────
-        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        mvprintw(row, rx + 2, "◆ Correction Points Economics & Campus Pool");
-        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        row += 2;
-
-        // Card 1: Balance & Status
-        {
-            int card_h = 5;
-            attron(COLOR_PAIR(CP_BORDER));
-            mvaddstr(row, rx + 2, bc.tl);
-            hline_box(row, rx + 3, rw - 6);
-            mvaddstr(row, rx + rw - 3, bc.tr);
-            for (int ch = 1; ch < card_h; ++ch) {
-                mvaddstr(row + ch, rx + 2, bc.v);
-                fill_row(row + ch, rx + 3, rw - 6);
-                mvaddstr(row + ch, rx + rw - 3, bc.v);
-            }
-            mvaddstr(row + card_h, rx + 2, bc.bl);
-            hline_box(row + card_h, rx + 3, rw - 6);
-            mvaddstr(row + card_h, rx + rw - 3, bc.br);
-            attroff(COLOR_PAIR(CP_BORDER));
-
-            attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-            mvprintw(row, rx + 4, " CURRENT BALANCE ");
-            attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_LABEL));
-            mvprintw(row + 1, rx + 4, "Available Points   :");
-            attroff(COLOR_PAIR(CP_LABEL));
+            attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
+            mvprint_clip(y, rx + 9, fb.project_name, 20);
+            attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
+            attron(COLOR_PAIR(CP_VALUE));
+            mvprint_clip(y, rx + 30, "@" + fb.evaluator_login, 14);
+            attroff(COLOR_PAIR(CP_VALUE));
             attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-            mvprintw(row + 1, rx + 26, "%s points", p.correction_points.empty() ? "0" : p.correction_points.c_str());
+            mvprint_clip(y, rx + rw - 24, fb.mark.empty() ? "N/A" : fb.mark, 6);
             attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_LABEL));
-            mvprintw(row + 2, rx + 4, "Wallet (Altarian ₳):");
-            attroff(COLOR_PAIR(CP_LABEL));
-            attron(COLOR_PAIR(CP_WARN) | A_BOLD);
-            mvprintw(row + 2, rx + 26, "%s ₳", p.wallet.empty() ? "0" : p.wallet.c_str());
-            attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_LABEL));
-            mvprintw(row + 3, rx + 4, "Submission Rights  :");
-            attroff(COLOR_PAIR(CP_LABEL));
-            attron(COLOR_PAIR(CP_VALUE));
-            mvprintw(row + 3, rx + 26, "Eligible to request %s project evaluations", p.correction_points.empty() ? "0" : p.correction_points.c_str());
-            attroff(COLOR_PAIR(CP_VALUE));
-
-            row += card_h + 2;
-        }
-
-        // Card 2: Rules & Economics Explanation
-        {
-            int card_h = 7;
-            attron(COLOR_PAIR(CP_BORDER));
-            mvaddstr(row, rx + 2, bc.tl);
-            hline_box(row, rx + 3, rw - 6);
-            mvaddstr(row, rx + rw - 3, bc.tr);
-            for (int ch = 1; ch < card_h; ++ch) {
-                mvaddstr(row + ch, rx + 2, bc.v);
-                fill_row(row + ch, rx + 3, rw - 6);
-                mvaddstr(row + ch, rx + rw - 3, bc.v);
-            }
-            mvaddstr(row + card_h, rx + 2, bc.bl);
-            hline_box(row + card_h, rx + 3, rw - 6);
-            mvaddstr(row + card_h, rx + rw - 3, bc.br);
-            attroff(COLOR_PAIR(CP_BORDER));
-
-            attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-            mvprintw(row, rx + 4, " 42 EVALUATION RULES & CAMPUS POOL ");
-            attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_SUCCESS));
-            mvprintw(row + 1, rx + 4, "● Earning Points   : +1 point awarded for every peer evaluation completed as corrector.");
-            attroff(COLOR_PAIR(CP_SUCCESS));
-
             attron(COLOR_PAIR(CP_WARN));
-            mvprintw(row + 2, rx + 4, "● Spending Points  : -1 point deducted per evaluation required when submitting a project.");
+            mvprint_clip(y, rx + rw - 15, fb.feedback_rating.empty() ? "★★★★★" : fb.feedback_rating, 9);
             attroff(COLOR_PAIR(CP_WARN));
+            ++shown;
+        }
+        if (count == 0) put(v + 3, 0, "No evaluations yet.", CP_DIM);
+        crow += body_h + 4;
+    }
 
-            attron(COLOR_PAIR(CP_VALUE));
-            mvprintw(row + 3, rx + 4, "● Campus Pool      : Redistributes points to students with 0 points based on activity.");
-            mvprintw(row + 4, rx + 4, "● Slot Tip         : Opening slots during peak hours (14:00 - 18:00) yields fastest matches.");
-            mvprintw(row + 5, rx + 4, "● Anti-Collision   : Intra enforces a +%dm offset between slot creation and defense time.", Config::get().offset_minutes);
-            attroff(COLOR_PAIR(CP_VALUE));
+    // ── 6. Evaluation economy ────────────────────────────────────────────────
+    {
+        int v = crow;
+        card_frame(v, "◆ " + i18n::tr("eval_economy"), 2);
+        if (vis(v + 2)) {
+            std::string l1 = i18n::tr("avail") + ": " + (p.correction_points.empty() ? "0" : p.correction_points) +
+                             " pts   " + i18n::tr("stat_wallet") + ": " + (p.wallet.empty() ? "0" : p.wallet) +
+                             " ₳   " + i18n::tr("can_request") + ": " + (p.correction_points.empty() ? "0" : p.correction_points) + " evals";
+            attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
+            mvprint_clip(sy(v + 2), rx + 4, l1, rw - 8);
+            attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
+        }
+        if (vis(v + 3)) {
+            std::string l2 = i18n::tr("econ_earn") + "   │   " + i18n::tr("econ_spend") + "   │   " + i18n::tr("econ_pool");
+            attron(COLOR_PAIR(CP_DIM));
+            mvprint_clip(sy(v + 3), rx + 4, l2, rw - 8);
+            attroff(COLOR_PAIR(CP_DIM));
+        }
+        crow += 6;
+    }
 
-            row += card_h + 1;
+    // ── Feedback inspector overlay ───────────────────────────────────────────
+    if (inspect) {
+        const EvaluationFeedback* fb = nullptr;
+        for (const auto& f : p.feedbacks) if (f.is_pending) { fb = &f; break; }
+        if (!fb && !p.feedbacks.empty()) fb = &p.feedbacks.front();
+
+        int mw = std::min(rw - 4, 70);
+        int mh = std::min(bottom - top - 4, 13);
+        int mx = rx + (rw - mw) / 2;
+        int my = top + 2;
+        if (mw >= 30) {
+            draw_modal_frame(my, mx, mh, mw, " " + i18n::tr("dash_action_title"));
+            if (fb) {
+                int r = my + 2;
+                auto row = [&](const std::string& lbl, const std::string& val, int vcp = CP_VALUE) {
+                    if (r >= my + mh - 1) return;
+                    attron(COLOR_PAIR(CP_LABEL));
+                    mvprint_clip(r, mx + 3, lbl, 13);
+                    attroff(COLOR_PAIR(CP_LABEL));
+                    attron(COLOR_PAIR(vcp) | A_BOLD);
+                    mvprint_clip(r, mx + 17, val, mw - 19);
+                    attroff(COLOR_PAIR(vcp) | A_BOLD);
+                    ++r;
+                };
+                row(i18n::tr("hdr_project"), fb->project_name);
+                row(i18n::tr("tip_student"), "@" + (fb->evaluator_login.empty() ? "peer" : fb->evaluator_login));
+                row(i18n::tr("hdr_grade"), fb->mark.empty() ? "Pending" : fb->mark, CP_SUCCESS);
+                if (!fb->comment.empty()) {
+                    std::string c = fb->comment;
+                    for (size_t i = 0; i < c.size() && r < my + mh - 2; i += (size_t)(mw - 6)) {
+                        attron(COLOR_PAIR(CP_VALUE));
+                        mvprint_clip(r++, mx + 4, c.substr(i, mw - 6), mw - 6);
+                        attroff(COLOR_PAIR(CP_VALUE));
+                    }
+                }
+            } else {
+                attron(COLOR_PAIR(CP_DIM));
+                mvprint_clip(my + 3, mx + 4, "No feedback selected.", mw - 8);
+                attroff(COLOR_PAIR(CP_DIM));
+            }
+            attron(COLOR_PAIR(CP_DIM));
+            mvprint_clip(my + mh - 1, mx + 3, "[Enter] / [Esc] close", mw - 6);
+            attroff(COLOR_PAIR(CP_DIM));
         }
     }
+
+    dash_scroll_max_ = std::max(0, crow - bottom);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1674,7 +1474,8 @@ void Renderer::draw_projects(const Profile& p, int sel, int top, int bottom, int
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab 3: Slots
 // ─────────────────────────────────────────────────────────────────────────────
-void Renderer::draw_slots(const Profile& p, int sel, int top, int bottom, int left_w) {
+void Renderer::draw_slots(const Profile& p, int sel, int hover, int btn_hover,
+                          int top, int bottom, int left_w) {
     draw_profile_panel(p, top, bottom, left_w);
 
     int rx = left_w;
@@ -1690,141 +1491,310 @@ void Renderer::draw_slots(const Profile& p, int sel, int top, int bottom, int le
     hline_box(bottom, rx, rw - 1);
     attroff(COLOR_PAIR(CP_BORDER));
 
-    int row = top;
-
-    // ── Header ───────────────────────────────────────────────────────────────
-    attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-    mvprint_clip(row, rx + 2, "◆ GESTOR DE SLOTS DE EVALUACIÓN", rw - 4);
-    attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-    row++;
-
-    attron(COLOR_PAIR(CP_VALUE));
-    mvprint_clip(row, rx + 2,
-                 "Un slot es un hueco que reservas para que otro alumno te evalúe.",
-                 rw - 4);
-    attroff(COLOR_PAIR(CP_VALUE));
-    row++;
-
-    // Leyenda + atajos
-    if (row < bottom) {
-        attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-        mvaddstr(row, rx + 2, "● Disponible");
-        attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
-        attron(COLOR_PAIR(CP_WARN) | A_BOLD);
-        mvaddstr(row, rx + 16, "● Reservado");
-        attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
-        attron(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
-        mvaddstr(row, rx + 29, " ▶ Seleccionado ");
-        attroff(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
-        attron(COLOR_PAIR(CP_DIM));
-        mvprint_clip(row, rx + 47, "[s] Nuevo   [d] -15 min   [D] Borrar", rw - 49);
-        attroff(COLOR_PAIR(CP_DIM));
-        row++;
-    }
-
-    // Separador
-    attron(COLOR_PAIR(CP_BORDER));
-    mvaddstr(row, rx, bc.t_left);
-    hline_box(row, rx + 1, rw - 2);
-    mvaddstr(row, rx + rw - 1, bc.t_right);
-    attroff(COLOR_PAIR(CP_BORDER));
-    row++;
-
     int total = (int)p.slots.size();
-    if (total == 0) {
-        attron(COLOR_PAIR(CP_WARN) | A_BOLD);
-        mvprint_clip(row + 1, rx + 4, "Todavía no tienes ningún slot abierto.", rw - 8);
-        attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
-        attron(COLOR_PAIR(CP_VALUE));
-        mvprint_clip(row + 3, rx + 4, "Pulsa [s] para crear tu primer slot.", rw - 8);
-        mvprint_clip(row + 4, rx + 4,
-                     "Se aplicará un margen de seguridad de +" +
-                     std::to_string(Config::get().offset_minutes) + " minutos.",
-                     rw - 8);
-        attroff(COLOR_PAIR(CP_VALUE));
-        return;
-    }
+    int gap   = Config::get().slot_gap_minutes;
+    int row   = top;
 
-    auto extract_date = [](const std::string& iso) -> std::string {
-        if (iso.size() >= 10) return iso.substr(0, 10);
-        return iso;
-    };
     auto extract_time = [](const std::string& iso) -> std::string {
         if (iso.size() >= 16) return iso.substr(11, 5);
         return iso;
     };
+    // Substitute the first "%d" in a translated template with an integer.
+    auto fmt_d = [](std::string s, int n) {
+        auto pos = s.find("%d");
+        if (pos != std::string::npos) s.replace(pos, 2, std::to_string(n));
+        return s;
+    };
 
-    // ── Lista de slots (2 líneas por slot, alto contraste) ───────────────────
-    for (int i = 0; i < total && (row + 1 < bottom - 2); ++i) {
+    // ── Header + live count badge ─────────────────────────────────────────────
+    std::string title = "◆ " + i18n::tr("slot_title");
+    attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    mvprint_clip(row, rx + 2, title, rw - 4);
+    attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+
+    draw_pill(row, rx + 2 + (int)title.size() + 2,
+              std::to_string(total) + " " + i18n::tr("slot_open_badge"), CP_PILL_SUCCESS);
+    row += 2;
+
+    // ── Subtitle ──────────────────────────────────────────────────────────────
+    attron(COLOR_PAIR(CP_VALUE));
+    mvprint_clip(row, rx + 2, i18n::tr("slot_subtitle"), rw - 4);
+    attroff(COLOR_PAIR(CP_VALUE));
+    row += 2;
+
+    // ── Summary strip ─────────────────────────────────────────────────────────
+    int total_mins = 0;
+    std::string min_begin;
+    for (const auto& sl : p.slots) {
+        total_mins += slot_duration_minutes(sl.begin_at, sl.end_at);
+        if (min_begin.empty() || sl.begin_at < min_begin) min_begin = sl.begin_at;
+    }
+    std::string next_label = "—";
+    if (!min_begin.empty())
+        next_label = slot_day_label(min_begin).substr(0, 3) + " " + extract_time(min_begin);
+
+    if (row < bottom - 2) {
+        int sx = rx + 2;
+        auto stat = [&](const std::string& label, const std::string& value, int cp) {
+            attron(COLOR_PAIR(CP_DIM));
+            mvprint_clip(row, sx, label + " ", rw - (sx - rx) - 2);
+            attroff(COLOR_PAIR(CP_DIM));
+            sx += (int)label.size() + 1;
+            attron(COLOR_PAIR(cp) | A_BOLD);
+            mvprint_clip(row, sx, value, rw - (sx - rx) - 2);
+            attroff(COLOR_PAIR(cp) | A_BOLD);
+            sx += (int)value.size() + 3;
+        };
+        stat(i18n::tr("stat_open"),  std::to_string(total), CP_VALUE);
+        stat(i18n::tr("stat_total"), minutes_label(total_mins), CP_VALUE);
+        stat(i18n::tr("stat_next"),  next_label, CP_SUCCESS);
+        stat(i18n::tr("stat_gap"),   std::to_string(gap) + "m", CP_WARN);
+        row += 2;
+    }
+
+    // ── Toolbar (clickable buttons) ───────────────────────────────────────────
+    bool have_sel = (total > 0 && sel >= 0 && sel < total);
+    auto draw_button = [&](int y, int& x, int index, const std::string& label, int pill_cp, bool enabled) {
+        std::string text = " " + label + " ";
+        int w = (int)text.size();
+        if (x + w > rx + rw - 2) return;
+        bool hov = (btn_hover == index) && enabled;
+        if (enabled) {
+            attron(COLOR_PAIR(hov ? CP_ROW_SEL : pill_cp) | A_BOLD);
+            mvaddstr(y, x, text.c_str());
+            attroff(COLOR_PAIR(hov ? CP_ROW_SEL : pill_cp) | A_BOLD);
+            add_hitbox(y, x, 1, w, MouseAction::SlotBtn, index);
+        } else {
+            attron(COLOR_PAIR(CP_DIM));
+            mvaddstr(y, x, text.c_str());
+            attroff(COLOR_PAIR(CP_DIM));
+        }
+        x += w + 2;
+    };
+
+    if (row < bottom - 2) {
+        int bx = rx + 2;
+        draw_button(row, bx, 0, i18n::tr("btn_new_slot"), CP_PILL_ACCENT, true);
+        draw_button(row, bx, 1, i18n::tr("btn_trim"), CP_PILL_WARN, have_sel);
+        draw_button(row, bx, 2, i18n::tr("btn_delete"), CP_PILL_FAIL, have_sel);
+        draw_button(row, bx, 3, i18n::tr("btn_gap") + ": " + std::to_string(gap) + "m", CP_PILL_SUCCESS, true);
+        row += 2;
+    }
+
+    // ── Separator ─────────────────────────────────────────────────────────────
+    if (row < bottom) {
+        attron(COLOR_PAIR(CP_BORDER));
+        mvaddstr(row, rx, bc.t_left);
+        hline_box(row, rx + 1, rw - 2);
+        mvaddstr(row, rx + rw - 1, bc.t_right);
+        attroff(COLOR_PAIR(CP_BORDER));
+        row++;
+    }
+
+    // ── Empty state ───────────────────────────────────────────────────────────
+    if (total == 0) {
+        int cy = row + 2;
+        if (cy + 3 < bottom) {
+            attron(COLOR_PAIR(CP_WARN) | A_BOLD);
+            mvprint_clip(cy, rx + 4, "◇  " + i18n::tr("slot_empty_title"), rw - 8);
+            attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
+            attron(COLOR_PAIR(CP_VALUE));
+            mvprint_clip(cy + 1, rx + 4, i18n::tr("slot_empty_sub"), rw - 8);
+            attroff(COLOR_PAIR(CP_VALUE));
+            attron(COLOR_PAIR(CP_DIM));
+            mvprint_clip(cy + 2, rx + 4,
+                         fmt_d(i18n::tr("slot_empty_offset"), Config::get().offset_minutes),
+                         rw - 8);
+            attroff(COLOR_PAIR(CP_DIM));
+
+            int bx = rx + 4;
+            draw_button(cy + 3, bx, 0, i18n::tr("btn_new_slot"), CP_PILL_ACCENT, true);
+        }
+        return;
+    }
+
+    // ── Slot list: single-line cards, one blank row between ───────────────────
+    for (int i = 0; i < total && row < bottom - 1; ++i) {
         const auto& sl = p.slots[i];
         bool is_sel = (i == sel);
-        add_hitbox(row, rx + 2, 2, rw - 4, MouseAction::ListRow, i);
+        bool is_hov = (i == hover && !is_sel);
+        bool is_avail = (sl.title.empty() || sl.title == "Available");
+        std::string status = is_avail ? i18n::tr("status_available") : i18n::tr("status_reserved");
+        int  stripe = (i % 2 == 0) ? CP_DEFAULT : CP_MODAL_BG;
+        int  bg = is_sel ? CP_ROW_SEL : stripe;
 
-        std::string date_str  = extract_date(sl.begin_at);
-        std::string when      = slot_day_label(sl.begin_at);
-        std::string range_str = extract_time(sl.begin_at) + " → " + extract_time(sl.end_at);
-        std::string dur       = slot_duration_label(sl.begin_at, sl.end_at);
-        std::string status    = sl.title.empty() ? "DISPONIBLE" : sl.title;
-        bool is_avail         = (sl.title.empty() || sl.title == "Available");
-        int  status_cp        = is_avail ? CP_SUCCESS : CP_WARN;
-        int  stripe           = (i % 2 == 0) ? CP_DEFAULT : CP_MODAL_BG;
+        attron(COLOR_PAIR(bg));
+        fill_row(row, rx + 2, rw - 4);
+        attroff(COLOR_PAIR(bg));
 
-        // Línea 1 — cabecera del slot
+        add_hitbox(row, rx + 2, 1, rw - 4, MouseAction::ListRow, i);
+
+        // Marker: ▶ selected, ▏ hovered.
         if (is_sel) {
             attron(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
-            fill_row(row, rx + 2, rw - 4);
-            std::string line = " ▶ #" + pad(std::to_string(i + 1), 2) + "    " +
-                               when + "    " + range_str + "    " + dur + "    ● " + status;
-            mvprint_clip(row, rx + 2, line, rw - 4);
+            mvprint_clip(row, rx + 2, "▶ ", 2);
+            attroff(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
+        } else if (is_hov) {
+            attron(COLOR_PAIR(CP_ACCENT) | A_BOLD);
+            mvprint_clip(row, rx + 2, "▏ ", 2);
+            attroff(COLOR_PAIR(CP_ACCENT) | A_BOLD);
+        }
+
+        // Index
+        attron(COLOR_PAIR(bg) | A_BOLD);
+        mvprint_clip(row, rx + 5, "#" + pad(std::to_string(i + 1), 2), 3);
+        attroff(COLOR_PAIR(bg) | A_BOLD);
+
+        // Status pill (filled badge — never colour-only)
+        {
+            int pill_cp = is_avail ? CP_PILL_SUCCESS : CP_PILL_WARN;
+            int pc = is_sel ? CP_ROW_SEL : pill_cp;
+            attron(COLOR_PAIR(pc) | A_BOLD);
+            mvprint_clip(row, rx + 10, " " + status + " ", 13);
+            attroff(COLOR_PAIR(pc) | A_BOLD);
+        }
+
+        // Day
+        attron(COLOR_PAIR(bg) | (is_sel ? A_BOLD : 0));
+        mvprint_clip(row, rx + 24, slot_day_label(sl.begin_at), 14);
+        attroff(COLOR_PAIR(bg) | (is_sel ? A_BOLD : 0));
+
+        // Time range
+        attron(COLOR_PAIR(is_sel ? CP_ROW_SEL : CP_TITLE) | A_BOLD);
+        mvprint_clip(row, rx + 39, extract_time(sl.begin_at) + " → " + extract_time(sl.end_at), 15);
+        attroff(COLOR_PAIR(is_sel ? CP_ROW_SEL : CP_TITLE) | A_BOLD);
+
+        // Duration
+        attron(COLOR_PAIR(is_sel ? CP_ROW_SEL : CP_DIM));
+        mvprint_clip(row, rx + 55, slot_duration_label(sl.begin_at, sl.end_at), 8);
+        attroff(COLOR_PAIR(is_sel ? CP_ROW_SEL : CP_DIM));
+
+        // ID (right-aligned when there is room)
+        std::string id = !sl.id.empty() ? sl.id : sl.ids;
+        if (!id.empty()) {
+            std::string idlabel = "ID " + id;
+            int ix = rx + rw - 2 - (int)idlabel.size() - 1;
+            if (ix > rx + 64) {
+                attron(COLOR_PAIR(is_sel ? CP_ROW_SEL : CP_DIM));
+                mvprint_clip(row, ix, idlabel, (int)idlabel.size());
+                attroff(COLOR_PAIR(is_sel ? CP_ROW_SEL : CP_DIM));
+            }
+        }
+
+        row += (i == total - 1) ? 1 : 2;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slot manager overlays: free-space picker + right-click context menu
+// ─────────────────────────────────────────────────────────────────────────────
+void Renderer::draw_gap_picker(int gap_minutes) {
+    const int box_w = 48;
+    const int box_h = 9;
+    int bx = (cols_ - box_w) / 2;
+    int by = (rows_ - box_h) / 2;
+    if (bx < 0) bx = 0;
+    if (by < 0) by = 0;
+
+    draw_modal_frame(by, bx, box_h, box_w, i18n::tr("gap_title"));
+
+    attron(COLOR_PAIR(CP_VALUE));
+    mvprint_clip(by + 2, bx + 3, i18n::tr("gap_sub"), box_w - 6);
+    attroff(COLOR_PAIR(CP_VALUE));
+
+    // Stepper: ◀ [ value ] ▶
+    int centre   = bx + box_w / 2;
+    int minus_x  = centre - 14;
+    int plus_x   = centre + 11;
+    std::string val = std::to_string(gap_minutes) + " " + i18n::tr("gap_minutes");
+
+    add_hitbox(by + 4, minus_x, 1, 3, MouseAction::GapMinus, 0);
+    add_hitbox(by + 4, plus_x, 1, 3, MouseAction::GapPlus, 0);
+
+    attron(COLOR_PAIR(CP_WARN) | A_BOLD);
+    mvprint_clip(by + 4, minus_x, "◀", 2);
+    attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
+
+    attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    mvprint_clip(by + 4, centre - (int)val.size() / 2, val, (int)val.size());
+    attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+
+    attron(COLOR_PAIR(CP_WARN) | A_BOLD);
+    mvprint_clip(by + 4, plus_x, "▶", 2);
+    attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
+
+    // Hint line
+    attron(COLOR_PAIR(CP_DIM));
+    std::string hint = i18n::tr("gap_hint");
+    mvprint_clip(by + 5, bx + (box_w - (int)hint.size()) / 2, hint, box_w - 4);
+    attroff(COLOR_PAIR(CP_DIM));
+
+    // Confirm / cancel
+    std::string ok = "[Enter] " + i18n::tr("confirm");
+    std::string ko = "[Esc] " + i18n::tr("cancel");
+    int ok_x = bx + box_w / 2 - (int)ok.size() - 3;
+    int ko_x = bx + box_w / 2 + 3;
+    add_hitbox(by + 7, ok_x, 1, (int)ok.size(), MouseAction::GapConfirm, 0);
+    add_hitbox(by + 7, ko_x, 1, (int)ko.size(), MouseAction::GapCancel, 0);
+
+    attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
+    mvprint_clip(by + 7, ok_x, ok, (int)ok.size());
+    attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
+    attron(COLOR_PAIR(CP_DIM));
+    mvprint_clip(by + 7, ko_x, ko, (int)ko.size());
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+void Renderer::draw_slot_context_menu(const SlotUiState& ui) {
+    std::vector<std::string> items = {
+        i18n::tr("ctx_copy"),
+        i18n::tr("ctx_trim"),
+        i18n::tr("ctx_delete"),
+    };
+    int w = 0;
+    for (const auto& it : items) w = std::max(w, (int)it.size());
+    w += 5; // marker + padding
+    int h = (int)items.size();
+
+    int bx = ui.ctx_x;
+    int by = ui.ctx_y;
+    if (bx + w > cols_) bx = cols_ - w;
+    if (by + h > rows_) by = rows_ - h;
+    if (bx < 0) bx = 0;
+    if (by < 0) by = 0;
+
+    const auto& bc = get_border_chars();
+    attron(COLOR_PAIR(CP_MODAL_BG));
+    for (int r = 0; r < h; ++r) fill_row(by + r, bx, w);
+    attroff(COLOR_PAIR(CP_MODAL_BG));
+
+    attron(COLOR_PAIR(CP_BORDER) | A_BOLD);
+    mvaddstr(by, bx, bc.tl);
+    hline_box(by, bx + 1, w - 2);
+    mvaddstr(by, bx + w - 1, bc.tr);
+    for (int r = 1; r < h - 1; ++r) {
+        mvaddstr(by + r, bx, bc.v);
+        mvaddstr(by + r, bx + w - 1, bc.v);
+    }
+    mvaddstr(by + h - 1, bx, bc.bl);
+    hline_box(by + h - 1, bx + 1, w - 2);
+    mvaddstr(by + h - 1, bx + w - 1, bc.br);
+    attroff(COLOR_PAIR(CP_BORDER) | A_BOLD);
+
+    for (int i = 0; i < h; ++i) {
+        bool is_sel = (i == ui.ctx_sel);
+        int cp = (i == 2) ? CP_FAIL : CP_VALUE; // delete = danger
+        add_hitbox(by + i, bx + 1, 1, w - 2, MouseAction::SlotCtx, i);
+        if (is_sel) {
+            attron(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
+            fill_row(by + i, bx + 1, w - 2);
+            mvprint_clip(by + i, bx + 2, "▶ " + items[i], w - 4);
             attroff(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
         } else {
-            attron(COLOR_PAIR(stripe));
-            fill_row(row, rx + 2, rw - 4);
-            attroff(COLOR_PAIR(stripe));
-
-            attron(COLOR_PAIR(CP_LABEL) | A_BOLD);
-            mvprintw(row, rx + 2, "   #%02d", i + 1);
-            attroff(COLOR_PAIR(CP_LABEL) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
-            mvprint_clip(row, rx + 9, when, 14);
-            attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
-
-            attron(COLOR_PAIR(CP_TITLE));
-            mvprint_clip(row, rx + 24, range_str, 16);
-            attroff(COLOR_PAIR(CP_TITLE));
-
-            attron(COLOR_PAIR(CP_DIM));
-            mvprint_clip(row, rx + 41, dur, 8);
-            attroff(COLOR_PAIR(CP_DIM));
-
-            attron(COLOR_PAIR(status_cp) | A_BOLD);
-            mvprint_clip(row, rx + 50, "● " + status, rw - 52);
-            attroff(COLOR_PAIR(status_cp) | A_BOLD);
+            attron(COLOR_PAIR(cp));
+            mvprint_clip(by + i, bx + 3, items[i], w - 4);
+            attroff(COLOR_PAIR(cp));
         }
-
-        // Línea 2 — detalle del slot
-        if (row + 1 < bottom - 2) {
-            if (is_sel) {
-                attron(COLOR_PAIR(CP_ROW_SEL));
-                fill_row(row + 1, rx + 2, rw - 4);
-                attroff(COLOR_PAIR(CP_ROW_SEL));
-            } else {
-                attron(COLOR_PAIR(stripe));
-                fill_row(row + 1, rx + 2, rw - 4);
-                attroff(COLOR_PAIR(stripe));
-            }
-            std::string detail = "        " + date_str + "   ·   ID " +
-                                 (!sl.id.empty() ? sl.id : sl.ids) +
-                                 "   ·   margen +" +
-                                 std::to_string(Config::get().offset_minutes) + " min";
-            attron(COLOR_PAIR(CP_DIM));
-            mvprint_clip(row + 1, rx + 4, detail, rw - 8);
-            attroff(COLOR_PAIR(CP_DIM));
-        }
-
-        row += 2;
-        if (row < bottom - 2 && i != total - 1) row++;
     }
 }
 
@@ -3164,13 +3134,16 @@ void Renderer::draw_cluster(const Profile& p, int room, int sel, int top, int bo
 // Dashboard: compact cluster minimap + hover inspector
 // ─────────────────────────────────────────────────────────────────────────────
 void Renderer::draw_cluster_minimap(const Profile& p, int top, int bottom,
-                                    int panel_w, int hovered) {
+                                    int panel_w, int hovered, int room_override) {
     if (bottom - top < 3 || panel_w < 20) return;
 
     const auto& bc = get_border_chars();
 
-    int room = room_from_location(p.location);
-    if (room < 0 || room >= 4) room = busiest_room(p.cluster_students);
+    int room = room_override;
+    if (room < 0 || room >= 4) {
+        room = room_from_location(p.location);
+        if (room < 0 || room >= 4) room = busiest_room(p.cluster_students);
+    }
     int online = count_students_in_room(p.cluster_students, room);
 
     // Frame
@@ -3188,17 +3161,39 @@ void Renderer::draw_cluster_minimap(const Profile& p, int top, int bottom,
     mvaddstr(bottom, panel_w - 1, bc.br);
     attroff(COLOR_PAIR(CP_BORDER));
 
-    // Title overlaid on the top border
+    // Title + clickable room pills (row top)
     {
-        std::string title = " ◆ CLUSTER " + std::to_string(room + 1) +
-                            " · " + std::to_string(online) + " ONLINE ";
+        std::string title = " ◆ " + i18n::tr("minimap_title");
         attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
         mvprint_clip(top, 2, title, panel_w - 4);
         attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+
+        if (panel_w >= 30) {
+            int px = panel_w - 14;
+            for (int r = 0; r < 4; ++r) {
+                int x = px + r * 3;
+                add_hitbox(top, x, 1, 2, MouseAction::MiniRoom, r);
+                if (r == room) {
+                    attron(COLOR_PAIR(CP_PILL_ACCENT) | A_BOLD);
+                    mvprint_clip(top, x, "C" + std::to_string(r + 1), 2);
+                    attroff(COLOR_PAIR(CP_PILL_ACCENT) | A_BOLD);
+                } else {
+                    attron(COLOR_PAIR(CP_DIM));
+                    mvprint_clip(top, x, "C" + std::to_string(r + 1), 2);
+                    attroff(COLOR_PAIR(CP_DIM));
+                }
+            }
+        }
     }
 
-    // 8x6 desk grid with an extra seat-header row and a footer hint (the panel
-    // is intentionally ~30% taller than the bare grid for readability).
+    // Online badge (row top + 1)
+    {
+        attron(COLOR_PAIR(CP_WARN) | A_BOLD);
+        mvprint_clip(top + 1, 2, std::to_string(online) + " " + i18n::tr("minimap_online"), panel_w - 4);
+        attroff(COLOR_PAIR(CP_WARN) | A_BOLD);
+    }
+
+    // Seat header (row top + 2)
     int inner_w = panel_w - 2;
     int label_w = 3;
     int cell_w  = (inner_w - label_w) / cluster_layout::SEATS;
@@ -3210,22 +3205,21 @@ void Renderer::draw_cluster_minimap(const Profile& p, int top, int bottom,
     if (cell_w < 2) cell_w = 2;
     int grid_x = 1 + label_w;
 
-    // Seat header
     if (label_w > 0) {
         attron(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
-        mvprintw(top + 1, 1, "DSK");
+        mvprintw(top + 2, 1, "DSK");
         attroff(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
     }
     for (int s = 0; s < cluster_layout::SEATS; ++s) {
         int x = grid_x + s * cell_w;
         if (x >= panel_w - 1) break;
         attron(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
-        mvprint_clip(top + 1, x, "S" + std::to_string(s + 1), std::min(cell_w, panel_w - 1 - x));
+        mvprint_clip(top + 2, x, "S" + std::to_string(s + 1), std::min(cell_w, panel_w - 1 - x));
         attroff(COLOR_PAIR(CP_HEADER_ROW) | A_BOLD);
     }
 
     for (int r = 0; r < cluster_layout::ROWS; ++r) {
-        int y = top + 2 + r;
+        int y = top + 3 + r;
         if (y >= bottom - 2) break;
 
         if (label_w > 0) {
@@ -3247,11 +3241,27 @@ void Renderer::draw_cluster_minimap(const Profile& p, int top, int bottom,
                 if (desk == hovered) minimap_hover_box_ = {y, x, avail, true};
 
                 bool is_self = (!p.login.empty() && cs->login == p.login);
-                int  cp      = is_self ? CP_WARN : CP_SUCCESS;
-                attron(COLOR_PAIR(cp) | A_BOLD);
-                mvaddstr(y, x, is_self ? "★" : "●");
-                if (cell_w >= 4) mvprint_clip(y, x + 1, "@" + cs->login, cell_w - 1);
-                attroff(COLOR_PAIR(cp) | A_BOLD);
+                if (is_self) {
+                    attron(COLOR_PAIR(CP_ACCENT) | A_BOLD);
+                    mvaddstr(y, x, "★");
+                    if (cell_w >= 4) mvprint_clip(y, x + 1, "@" + cs->login, cell_w - 1);
+                    attroff(COLOR_PAIR(CP_ACCENT) | A_BOLD);
+                } else {
+                    if (!cs->cdn_uri.empty() && image_renderer::has_image(cs->cdn_uri)) {
+                        attron(COLOR_PAIR(CP_ACCENT));
+                        mvaddstr(y, x, "▀");
+                        attroff(COLOR_PAIR(CP_ACCENT));
+                        image_renderer::render_halfblock(cs->cdn_uri, y, x,
+                                                          std::min(cell_w, 4), 1,
+                                                          bottom - top, cols_);
+                        if (cell_w >= 4) mvprint_clip(y, x + 1, "@" + cs->login, cell_w - 1);
+                    } else {
+                        attron(COLOR_PAIR(CP_SUCCESS));
+                        mvaddstr(y, x, "●");
+                        attroff(COLOR_PAIR(CP_SUCCESS));
+                        if (cell_w >= 4) mvprint_clip(y, x + 1, "@" + cs->login, cell_w - 1);
+                    }
+                }
             } else {
                 attron(COLOR_PAIR(CP_DIM));
                 mvprint_clip(y, x, "·", avail);
@@ -3260,10 +3270,20 @@ void Renderer::draw_cluster_minimap(const Profile& p, int top, int bottom,
         }
     }
 
-    // Footer hint on the row just above the bottom border.
-    if (bottom - 1 > top + 2 + cluster_layout::ROWS - 1) {
+    // Legend footer
+    if (bottom - 1 > top + 3 + cluster_layout::ROWS - 1) {
+        int y = bottom - 1;
+        int x = 2;
+        attron(COLOR_PAIR(CP_SUCCESS));
+        mvprint_clip(y, x, "● " + i18n::tr("legend_online"), panel_w - 4);
+        attroff(COLOR_PAIR(CP_SUCCESS));
+        x += 2 + (int)i18n::tr("legend_online").size() + 2;
+        attron(COLOR_PAIR(CP_ACCENT) | A_BOLD);
+        mvprint_clip(y, x, "★ " + i18n::tr("legend_you"), panel_w - 4 - (x - 2));
+        attroff(COLOR_PAIR(CP_ACCENT) | A_BOLD);
+        x += 2 + (int)i18n::tr("legend_you").size() + 2;
         attron(COLOR_PAIR(CP_DIM));
-        mvprint_clip(bottom - 1, 2, "Hover: detalle  ·  Click/Enter: perfil  ·  ★ = tú", panel_w - 4);
+        mvprint_clip(y, x, "· " + i18n::tr("legend_empty"), panel_w - 4 - (x - 2));
         attroff(COLOR_PAIR(CP_DIM));
     }
 }
@@ -3288,22 +3308,22 @@ void Renderer::draw_cluster_tooltip(
     if (it != profiles.end()) entry = &it->second;
 
     std::vector<std::pair<std::string, std::string>> rows;
-    rows.push_back({"Student", cs->full_name.empty() ? "(loading…)" : cs->full_name});
-    rows.push_back({"Workstation", cs->host + "  (C" + std::to_string(room + 1) +
+    rows.push_back({i18n::tr("tip_student"), cs->full_name.empty() ? "(…)" : cs->full_name});
+    rows.push_back({i18n::tr("tip_ws"), cs->host + "  (C" + std::to_string(room + 1) +
                     " R" + std::to_string(rr + 1) + " S" + std::to_string(ss + 1) + ")"});
-    rows.push_back({"Active since", format_active_since(cs->begin_at)});
-    rows.push_back({"Presence", "● ONLINE"});
+    rows.push_back({i18n::tr("tip_active"), format_active_since(cs->begin_at)});
+    rows.push_back({i18n::tr("tip_presence"), "● " + i18n::tr("minimap_online")});
 
     if (entry && entry->loaded) {
         const Profile& up = entry->profile;
         if (!up.level.empty())
-            rows.push_back({"Cursus level", up.level});
+            rows.push_back({i18n::tr("stat_level"), up.level});
         if (!up.location.empty() && up.location != "Unavailable")
-            rows.push_back({"Seat", up.location});
+            rows.push_back({i18n::tr("stat_seat"), up.location});
     } else if (entry && entry->loading) {
-        rows.push_back({"Profile", "⟳ Fetching from intra…"});
+        rows.push_back({i18n::tr("tip_student"), i18n::tr("tip_fetching")});
     } else {
-        rows.push_back({"Profile", "Click / Enter to open profile"});
+        rows.push_back({i18n::tr("tip_student"), i18n::tr("tip_open")});
     }
 
     const auto& bc = get_border_chars();
@@ -3317,7 +3337,7 @@ void Renderer::draw_cluster_tooltip(
     }
     if (bw < 24 || bx < 0) return;
 
-    int bh = (int)rows.size() + 3; // top border + rows + footer + bottom border
+    int bh = (int)rows.size() + 3;
     int by = minimap_hover_box_.y - 1;
     if (by < top) by = top;
     if (by + bh > bottom) by = bottom - bh;
@@ -3340,10 +3360,17 @@ void Renderer::draw_cluster_tooltip(
     mvaddstr(by + bh, bx + bw - 1, bc.br);
     attroff(COLOR_PAIR(CP_BORDER) | A_BOLD);
 
-    std::string title = " LIVE WORKSTATION INSPECTOR · @" + cs->login + " ";
+    std::string title = " " + i18n::tr("minimap_title") + " · @" + cs->login + " ";
     attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
     mvprint_clip(by, bx + 2, title, bw - 4);
     attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+
+    if (!cs->cdn_uri.empty() && image_renderer::has_image(cs->cdn_uri)) {
+        int photo_x = bx + bw - 20;
+        if (photo_x > bx + 3)
+            image_renderer::render_image(cs->cdn_uri, by, photo_x, 4, 3,
+                                              bottom - top, cols_);
+    }
 
     for (size_t i = 0; i < rows.size(); ++i) {
         int ry = by + 1 + (int)i;
@@ -3351,15 +3378,14 @@ void Renderer::draw_cluster_tooltip(
         mvprint_clip(ry, bx + 2, rows[i].first, 13);
         attroff(COLOR_PAIR(CP_LABEL));
 
-        bool success = (rows[i].first == "Presence");
+        bool success = (rows[i].first == i18n::tr("tip_presence"));
         attron(COLOR_PAIR(success ? CP_SUCCESS : CP_VALUE) | (success ? A_BOLD : 0));
         mvprint_clip(ry, bx + 15, rows[i].second, bw - 17);
         attroff(COLOR_PAIR(success ? CP_SUCCESS : CP_VALUE) | (success ? A_BOLD : 0));
     }
 
     attron(COLOR_PAIR(CP_DIM));
-    mvprint_clip(by + bh - 1, bx + 2, "[click] Fetch intra profile  ·  [r] Refresh",
-                 bw - 4);
+    mvprint_clip(by + bh - 1, bx + 2, i18n::tr("tip_footer"), bw - 4);
     attroff(COLOR_PAIR(CP_DIM));
 }
 
@@ -3452,9 +3478,15 @@ void Renderer::draw_user_modal(
     // Remember the avatar frame interior so draw() can place the real photo
     // there (and hide the base dashboard/cluster photos behind the modal).
     user_modal_avatar_box_ = ImageBox{top + 1, lx + 1, av_w, av_h, true};
-    user_modal_avatar_key_ = up.avatar_url;
+    // Prefer cs->cdn_uri (cached from cluster data) over up.avatar_url
+    if (cs && !cs->cdn_uri.empty() && image_renderer::has_image(cs->cdn_uri)) {
+        user_modal_avatar_key_ = cs->cdn_uri;
+    } else {
+        user_modal_avatar_key_ = up.avatar_url;
+    }
 
-    if (up.avatar_url.empty() || !image_renderer::has_image(up.avatar_url)) {
+    const std::string& avatar_key = user_modal_avatar_key_;
+    if (avatar_key.empty() || !image_renderer::has_image(avatar_key)) {
         attron(COLOR_PAIR(CP_DIM));
         mvprintw(top + av_h / 2 + 1, lx + (av_w - 6) / 2, "[FOTO]");
         attroff(COLOR_PAIR(CP_DIM));

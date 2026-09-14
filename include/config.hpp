@@ -9,6 +9,7 @@ struct Config {
     // [slots]
     int offset_minutes   = 15;
     int default_duration = 30;
+    int slot_gap_minutes = 15;   // free space left between consecutive slots
 
     // [network]
     int timeout          = 10;

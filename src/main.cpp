@@ -203,14 +203,17 @@ int main(int argc, char* argv[]) {
 
     Tab  current_tab  = tab_from_code(Config::get().start_tab);
     Tab  prev_tab     = Tab::Dashboard;
-    int  dash_subview = 0; // 0: Overview, 1: Scale Teams, 2: Points & Pool
-    int  dash_sel     = 0;
     bool dash_inspect = false;
+    int  dash_scroll  = 0;     // dashboard vertical scroll offset
+    int  minimap_room = -1;    // minimap room pill (-1 = auto)
     int  slot_sel     = 0;
     int  tree_sel     = 0;
     int  cluster_sel  = -1;  // -1 when the current cluster has nobody online
     int  cluster_room = 2; // Default to Cluster 3 (index 2) where students are online
     int  minimap_hover = -1; // room*CELLS+desk of the hovered dashboard minimap desk
+    int  slot_hover = -1;    // hovered slot row (-1 none)
+    int  slot_btn_hover = -1;// hovered slot toolbar button (0-3, -1 none)
+    SlotUiState slot_ui;     // free-space picker + right-click context menu
     bool        user_modal_open  = false;   // full-screen user profile modal
     std::string user_modal_login;
     SearchState search;                     // global dynamic search
@@ -306,6 +309,64 @@ int main(int argc, char* argv[]) {
         clipboard::copy(login);
         std::lock_guard<std::mutex> lk(state.mtx);
         state.status_msg = "Copied @" + login + " to clipboard";
+    };
+
+    // Slot context-menu action: 0 copy ID, 1 trim -15m, 2 delete.
+    auto run_slot_ctx_action = [&](int idx) {
+        int count = 0;
+        Slot s;
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            count = (int)state.profile.slots.size();
+            if (slot_sel >= 0 && slot_sel < count) s = state.profile.slots[slot_sel];
+        }
+        if (count == 0 || slot_sel < 0 || slot_sel >= count) return;
+
+        if (idx == 0) {
+            std::string id = !s.id.empty() ? s.id : s.ids;
+            if (!id.empty()) {
+                clipboard::copy(id);
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.status_msg = "Copied slot ID " + id;
+            }
+        } else if (idx == 1) {
+            std::string sub_ids = !s.ids.empty() ? s.ids : s.id;
+            worker.enqueue({ NetTaskKind::TrimSlot15m, s.id, sub_ids, s.begin_at, s.end_at });
+        } else if (idx == 2) {
+            std::string target_id = !s.ids.empty() ? s.ids : s.id;
+            if (!target_id.empty()) {
+                worker.enqueue({ NetTaskKind::DeleteSlot, target_id, "" });
+                if (slot_sel > 0 && slot_sel == count - 1) slot_sel--;
+            }
+        }
+    };
+
+    // Slot toolbar buttons: 0 new, 1 trim, 2 delete, 3 free-space picker.
+    auto run_slot_toolbar_action = [&](int idx) {
+        if (idx == 3) {
+            slot_ui.gap_minutes = Config::get().slot_gap_minutes;
+            slot_ui.gap_picker_open = true;
+            return;
+        }
+        if (idx == 0) {
+            bool pending = false;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                pending = state.slot_pending;
+                state.error_msg.clear();
+            }
+            if (pending) return;
+            int offset   = Config::get().offset_minutes;
+            int duration = Config::get().default_duration;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.slot_pending = true;
+                state.status_msg = "Finding next non-overlapping slot...";
+            }
+            worker.enqueue({ NetTaskKind::CreateSlot, std::to_string(offset), std::to_string(duration) });
+            return;
+        }
+        run_slot_ctx_action(idx); // 1 trim, 2 delete
     };
 
     // Name/slug of the currently selected roadmap project, or "".
@@ -831,12 +892,13 @@ int main(int argc, char* argv[]) {
                       login_mode, login_method, active_field,
                       user_buf, pass_buf, cookie_buf, detected_file,
                       theme_switcher_open, theme_sel,
-                      dash_subview, dash_sel, dash_inspect,
+                      dash_inspect, dash_scroll, minimap_room,
                       cluster_room,
                       preview_panel, preview_snap,
                       subject_modal_open, subject_scroll,
                       action_menu_open, action_items, action_menu_sel,
                       minimap_hover,
+                      slot_hover, slot_btn_hover, slot_ui,
                       user_modal_open, user_modal_login,
                       search, menu);
 
@@ -1132,6 +1194,66 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // ── Slot manager: free-space picker ───────────────────────────────────
+        if (slot_ui.gap_picker_open) {
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                if (getmouse(&ev) == OK &&
+                    (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED))) {
+                    MouseHit hit = renderer.hit_test(ev.y, ev.x);
+                    if (hit.action == MouseAction::GapMinus) {
+                        slot_ui.gap_minutes = std::max(0, slot_ui.gap_minutes - 5);
+                    } else if (hit.action == MouseAction::GapPlus) {
+                        slot_ui.gap_minutes = std::min(60, slot_ui.gap_minutes + 5);
+                    } else if (hit.action == MouseAction::GapConfirm) {
+                        Config::get().slot_gap_minutes = slot_ui.gap_minutes;
+                        Config::get().save();
+                        { std::lock_guard<std::mutex> lk(state.mtx);
+                          state.status_msg = i18n::tr("stat_gap") + ": " + std::to_string(slot_ui.gap_minutes) + "m"; }
+                        slot_ui.gap_picker_open = false;
+                    } else if (hit.action == MouseAction::GapCancel) {
+                        slot_ui.gap_picker_open = false;
+                    }
+                }
+                continue;
+            }
+            if (ch == 'j' || ch == KEY_LEFT) { slot_ui.gap_minutes = std::max(0, slot_ui.gap_minutes - 5); continue; }
+            if (ch == 'k' || ch == KEY_RIGHT) { slot_ui.gap_minutes = std::min(60, slot_ui.gap_minutes + 5); continue; }
+            if (ch == '\n' || ch == KEY_ENTER) {
+                Config::get().slot_gap_minutes = slot_ui.gap_minutes;
+                Config::get().save();
+                { std::lock_guard<std::mutex> lk(state.mtx);
+                  state.status_msg = i18n::tr("stat_gap") + ": " + std::to_string(slot_ui.gap_minutes) + "m"; }
+                slot_ui.gap_picker_open = false;
+                continue;
+            }
+            if (ch == 27) { slot_ui.gap_picker_open = false; continue; }
+            continue;
+        }
+
+        // ── Slot manager: right-click context menu ────────────────────────────
+        if (slot_ui.ctx_open) {
+            const int n = 3;
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                if (getmouse(&ev) == OK) {
+                    if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED)) {
+                        MouseHit hit = renderer.hit_test(ev.y, ev.x);
+                        if (hit.action == MouseAction::SlotCtx && hit.index >= 0 && hit.index < n) {
+                            run_slot_ctx_action(hit.index);
+                        }
+                        slot_ui.ctx_open = false;
+                    }
+                }
+                continue;
+            }
+            if (ch == 'j' || ch == KEY_DOWN) { slot_ui.ctx_sel = (slot_ui.ctx_sel + 1) % n; continue; }
+            if (ch == 'k' || ch == KEY_UP)   { slot_ui.ctx_sel = (slot_ui.ctx_sel + n - 1) % n; continue; }
+            if (ch == '\n' || ch == KEY_ENTER) { run_slot_ctx_action(slot_ui.ctx_sel); slot_ui.ctx_open = false; continue; }
+            if (ch == 27) { slot_ui.ctx_open = false; continue; }
+            continue;
+        }
+
         // ── Subject preview modal ─────────────────────────────────────────────
         if (subject_modal_open) {
             SubjectPreview pv;
@@ -1339,15 +1461,8 @@ int main(int argc, char* argv[]) {
         // Shared vertical movement used by keyboard (j/k) and mouse wheel.
         auto move_vertical = [&](int dir) {
             if (current_tab == Tab::Dashboard) {
-                if (dash_subview == 1) {
-                    int fb_count = 0;
-                    {
-                        std::lock_guard<std::mutex> lk(state.mtx);
-                        fb_count = (int)state.profile.feedbacks.size();
-                    }
-                    if (fb_count > 0)
-                        dash_sel = std::clamp(dash_sel + dir, 0, fb_count - 1);
-                }
+                int max_scroll = renderer.dash_scroll_max();
+                dash_scroll = std::clamp(dash_scroll + dir, 0, max_scroll);
             } else if (current_tab == Tab::Slots && slot_count > 0) {
                 slot_sel = std::clamp(slot_sel + dir, 0, slot_count - 1);
             } else if (current_tab == Tab::Roadmap && tree_count > 0) {
@@ -1367,9 +1482,13 @@ int main(int argc, char* argv[]) {
         if (ch == KEY_MOUSE) {
             MEVENT ev;
             if (getmouse(&ev) == OK) {
-                // Track the hovered dashboard minimap desk (motion + clicks).
+                // Track hover state (motion + clicks): minimap desk, slot row, slot button.
                 MouseHit hover_hit = renderer.hit_test(ev.y, ev.x);
                 minimap_hover = (hover_hit.action == MouseAction::DashMinimap)
+                                    ? hover_hit.index : -1;
+                slot_hover = (hover_hit.action == MouseAction::ListRow && current_tab == Tab::Slots)
+                                    ? hover_hit.index : -1;
+                slot_btn_hover = (hover_hit.action == MouseAction::SlotBtn)
                                     ? hover_hit.index : -1;
 
                 if (ev.bstate & (BUTTON4_PRESSED | BUTTON4_CLICKED)) {
@@ -1387,17 +1506,19 @@ int main(int argc, char* argv[]) {
                         if (hit.index >= 0 && hit.index < 4)
                             current_tab = static_cast<Tab>(hit.index);
                         break;
-                    case MouseAction::DashSubview:
-                        dash_subview = std::clamp(hit.index, 0, 2);
-                        dash_sel = 0;
-                        break;
                     case MouseAction::ListRow:
-                        if (current_tab == Tab::Dashboard && dash_subview == 1)
-                            dash_sel = hit.index;
-                        else if (current_tab == Tab::Slots)
+                        if (current_tab == Tab::Slots)
                             slot_sel = hit.index;
                         else if (current_tab == Tab::Roadmap)
                             tree_sel = hit.index;
+                        break;
+                    case MouseAction::MiniRoom:
+                        if (hit.index >= 0 && hit.index < 4)
+                            minimap_room = hit.index;
+                        break;
+                    case MouseAction::DashReview:
+                        if (current_tab == Tab::Dashboard)
+                            dash_inspect = true;
                         break;
                     case MouseAction::ClusterRoom:
                         if (hit.index >= 0 && hit.index < 4) {
@@ -1439,13 +1560,26 @@ int main(int argc, char* argv[]) {
                             search.results.clear();
                         }
                         break;
+                    case MouseAction::SlotBtn:
+                        if (current_tab == Tab::Slots)
+                            run_slot_toolbar_action(hit.index);
+                        break;
                     default:
                         break;
                     }
                 } else if (ev.bstate & (BUTTON3_PRESSED | BUTTON3_CLICKED)) {
                     MouseHit hit = renderer.hit_test(ev.y, ev.x);
-                    if (hit.action == MouseAction::ClusterDesk && hit.index >= 0)
+                    if (hit.action == MouseAction::ClusterDesk && hit.index >= 0) {
                         copy_cluster_login(hit.index);
+                    } else if (hit.action == MouseAction::ListRow && current_tab == Tab::Slots &&
+                               slot_count > 0 && hit.index >= 0 && hit.index < slot_count) {
+                        // Open the slot context menu anchored at the cursor.
+                        slot_sel = hit.index;
+                        slot_ui.ctx_open = true;
+                        slot_ui.ctx_sel = 0;
+                        slot_ui.ctx_x = ev.x;
+                        slot_ui.ctx_y = ev.y;
+                    }
                 }
             }
             continue;
@@ -1481,8 +1615,7 @@ int main(int argc, char* argv[]) {
 
         case '[':
             if (current_tab == Tab::Dashboard) {
-                dash_subview = (dash_subview + 2) % 3;
-                dash_sel = 0;
+                dash_scroll = 0;
             } else if (current_tab == Tab::Cluster) {
                 cluster_room = (cluster_room + 3) % 4;
                 image_renderer::clear_kitty_images();
@@ -1493,8 +1626,7 @@ int main(int argc, char* argv[]) {
 
         case ']':
             if (current_tab == Tab::Dashboard) {
-                dash_subview = (dash_subview + 1) % 3;
-                dash_sel = 0;
+                dash_scroll = renderer.dash_scroll_max();
             } else if (current_tab == Tab::Cluster) {
                 cluster_room = (cluster_room + 1) % 4;
                 image_renderer::clear_kitty_images();

@@ -323,9 +323,14 @@ void NetworkWorker::handle(const NetTask& task) {
             }
         }
 
+        // Free space between consecutive slots: the new window must not touch an
+        // existing one even after expanding it by the configured gap on both sides.
+        int gap_minutes = Config::get().slot_gap_minutes;
+        time_t gap_sec = static_cast<time_t>(gap_minutes) * 60;
+
         auto has_overlap = [&](time_t b, time_t e) -> bool {
             for (const auto& w : existing_windows) {
-                if (network::slots_overlap(b, e, w.first, w.second)) {
+                if (network::slots_overlap(b - gap_sec, e + gap_sec, w.first, w.second)) {
                     return true;
                 }
             }

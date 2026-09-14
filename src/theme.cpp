@@ -271,6 +271,10 @@ void apply_theme_to_ncurses(const ThemePalette& palette) {
     init_pair(20, c_bg_pri,   c_success);  // CP_BADGE_PASS
     init_pair(21, c_fg_text,  c_error);    // CP_BADGE_FAIL
     init_pair(22, c_accent,   -1);         // CP_ACCENT
+    init_pair(23, c_bg_sec,   c_success);  // CP_PILL_SUCCESS
+    init_pair(24, c_bg_sec,   c_warning);  // CP_PILL_WARN
+    init_pair(25, c_bg_sec,   c_error);    // CP_PILL_FAIL
+    init_pair(26, c_bg_sec,   c_accent);   // CP_PILL_ACCENT
 }
 
 } // namespace theme

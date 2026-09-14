@@ -41,6 +41,14 @@ enum class MouseAction {
     MenuItem,     // index = root menu row
     SettingsRow,  // index = settings row (offset by scroll)
     ConfirmChoice,// index = 0 (yes) / 1 (no)
+    SlotBtn,      // index = 0 (new) / 1 (trim) / 2 (delete) / 3 (free space)
+    SlotCtx,      // index = 0 (copy) / 1 (trim) / 2 (delete) context menu
+    GapMinus,     // free-space picker ◀
+    GapPlus,      // free-space picker ▶
+    GapConfirm,   // free-space picker confirm
+    GapCancel,    // free-space picker cancel
+    MiniRoom,     // index = cluster minimap room pill (0-3)
+    DashReview,   // dashboard "Review" action button
 };
 
 // ─── Main (Esc) menu ──────────────────────────────────────────────────────────
@@ -80,6 +88,19 @@ struct MouseHit {
 };
 
 /**
+ * Transient state for the slot manager's layered UI: the free-space picker and
+ * the right-click context menu. Owned by the input loop, rendered by Renderer.
+ */
+struct SlotUiState {
+    bool gap_picker_open = false;
+    int  gap_minutes     = 0;   // value being edited (0..60, step 5)
+    bool ctx_open        = false;
+    int  ctx_sel         = 0;   // selected context item (0..2)
+    int  ctx_y           = 0;   // screen row of the context menu
+    int  ctx_x           = 0;   // screen col of the context menu
+};
+
+/**
  * TUI renderer — wraps ncurses and draws the three-tab layout.
  * All draw methods must be called from the UI (main) thread only.
  */
@@ -105,7 +126,7 @@ public:
               const std::string& login_buf, const std::string& pass_buf,
               const std::string& cookie_buf, const std::string& detected_file,
               bool theme_switcher_open = false, int theme_sel = 0,
-              int dash_subview = 0, int dash_sel = 0, bool dash_inspect = false,
+              bool dash_inspect = false, int dash_scroll = 0, int minimap_room = -1,
               int cluster_room = 0,
               bool preview_panel = false,
               const SubjectPreview& preview = SubjectPreview{},
@@ -115,6 +136,9 @@ public:
               const std::vector<std::pair<std::string, bool>>& action_items = {},
               int action_sel = 0,
               int minimap_hover = -1,
+              int slot_hover = -1,
+              int slot_btn_hover = -1,
+              const SlotUiState& slot_ui = SlotUiState{},
               bool user_modal_open = false,
               const std::string& user_modal_login = std::string(),
               const SearchState& search = SearchState{},
@@ -124,6 +148,9 @@ public:
 
     int terminal_cols() const;
     int terminal_rows() const;
+
+    /** Max scroll offset the dashboard reached last frame (0 if it fits). */
+    int dash_scroll_max() const { return dash_scroll_max_; }
 
     /** Resolve a screen cell to a clickable target from the last drawn frame. */
     MouseHit hit_test(int y, int x) const;
@@ -149,14 +176,17 @@ private:
 
     void draw_profile_panel(const Profile& p, int top, int bottom, int width);
 
-    void draw_dashboard(const Profile& p, int subview, int sel, bool inspect, int top, int bottom, int left_w);
+    void draw_dashboard(const Profile& p, bool inspect, int scroll, int minimap_room, int top, int bottom, int left_w);
     void draw_projects (const Profile& p, int sel, int top, int bottom, int left_w,
                         bool preview_panel, const SubjectPreview& pv);
-    void draw_slots    (const Profile& p, int sel, int top, int bottom, int left_w);
+    void draw_slots    (const Profile& p, int sel, int hover, int btn_hover,
+                        int top, int bottom, int left_w);
+    void draw_gap_picker(int gap_minutes);
+    void draw_slot_context_menu(const SlotUiState& ui);
     void draw_roadmap  (Profile& p, int sel, int top, int bottom, int left_w,
                         bool preview_panel, const SubjectPreview& pv);
     void draw_cluster  (const Profile& p, int room, int sel, int top, int bottom, int left_w);
-    void draw_cluster_minimap(const Profile& p, int top, int bottom, int panel_w, int hovered);
+    void draw_cluster_minimap(const Profile& p, int top, int bottom, int panel_w, int hovered, int room);
     void draw_cluster_tooltip(const Profile& p,
                               const std::unordered_map<std::string, ClusterProfileEntry>& profiles,
                               int top, int bottom, int panel_w);
@@ -206,4 +236,5 @@ private:
 
     int cols_{80};
     int rows_{24};
+    int dash_scroll_max_{0};
 };
