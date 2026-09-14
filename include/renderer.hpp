@@ -1,0 +1,119 @@
+#pragma once
+#include "types.hpp"
+#include <string>
+#include <vector>
+#include <utility>
+
+// ─── Mouse hit-testing ────────────────────────────────────────────────────────
+enum class MouseAction {
+    None,
+    TabBar,       // index = tab (0-4)
+    DashSubview,  // index = subview (0-2)
+    ListRow,      // index = absolute row in the active tab's list
+    ClusterRoom,  // index = room (0-3)
+    ClusterDesk,  // index = desk (0-47)
+    LoginMethod,  // index = login method (0-2)
+    LoginField,   // index = field (0-1)
+    ThemeRow,     // index = theme (0-9)
+};
+
+struct MouseHit {
+    MouseAction action = MouseAction::None;
+    int         index  = -1;
+};
+
+/**
+ * TUI renderer — wraps ncurses and draws the three-tab layout.
+ * All draw methods must be called from the UI (main) thread only.
+ */
+class Renderer {
+public:
+    Renderer();
+    ~Renderer();
+
+    // Non-copyable
+    Renderer(const Renderer&)            = delete;
+    Renderer& operator=(const Renderer&) = delete;
+
+    /**
+     * Draw one full frame.
+     * Takes a snapshot of SharedState under its mutex.
+     */
+    void draw(SharedState& state, Tab current_tab,
+              int project_sel, int slot_sel, int tree_sel, int cluster_sel,
+              bool login_mode, int login_method, int active_field,
+              const std::string& login_buf, const std::string& pass_buf,
+              const std::string& cookie_buf, const std::string& detected_file,
+              bool theme_switcher_open = false, int theme_sel = 0,
+              int dash_subview = 0, int dash_sel = 0, bool dash_inspect = false,
+              int cluster_room = 0,
+              bool preview_panel = false,
+              const SubjectPreview& preview = SubjectPreview{},
+              bool subject_modal = false,
+              int subject_scroll = 0,
+              const std::vector<std::pair<std::string, bool>>& action_items = {},
+              int action_sel = 0);
+
+    // Overload for simple calling
+    void draw(SharedState& state, Tab current_tab,
+              int project_sel, int slot_sel,
+              bool login_mode, const std::string& login_buf,
+              bool password_mode, const std::string& pass_buf);
+
+    void refresh_now();
+
+    int terminal_cols() const;
+    int terminal_rows() const;
+
+    /** Resolve a screen cell to a clickable target from the last drawn frame. */
+    MouseHit hit_test(int y, int x) const;
+
+private:
+    struct Hitbox {
+        int         y = 0, x = 0, h = 1, w = 0;
+        MouseAction action = MouseAction::None;
+        int         index  = -1;
+    };
+
+    void add_hitbox(int y, int x, int h, int w, MouseAction action, int index) {
+        hitboxes_.push_back({y, x, h, w, action, index});
+    }
+
+    void draw_tab_bar(Tab current_tab, bool loading);
+    void draw_status_bar(const std::string& login,
+                         const std::string& status_msg,
+                         const std::string& error_msg,
+                         Tab tab);
+
+    void draw_profile_panel(const Profile& p, int top, int bottom, int width);
+
+    void draw_dashboard(const Profile& p, int subview, int sel, bool inspect, int top, int bottom, int left_w);
+    void draw_projects (const Profile& p, int sel, int top, int bottom, int left_w,
+                        bool preview_panel, const SubjectPreview& pv);
+    void draw_slots    (const Profile& p, int sel, int top, int bottom, int left_w);
+    void draw_roadmap  (Profile& p, int sel, int top, int bottom, int left_w,
+                        bool preview_panel, const SubjectPreview& pv);
+    void draw_cluster  (const Profile& p, int room, int sel, int top, int bottom, int left_w);
+
+    void draw_login_prompt(int login_method, int active_field,
+                           const std::string& user_buf,
+                           const std::string& pass_buf,
+                           const std::string& cookie_buf,
+                           const std::string& detected_file,
+                           const std::string& error_msg,
+                           bool loading, const std::string& status_msg);
+
+    void draw_theme_switcher(int active_idx);
+
+    // Subject (PDF) preview
+    struct ImageBox { int row = 0, col = 0, w = 0, h = 0; bool visible = false; };
+    ImageBox draw_subject_panel(const SubjectPreview& pv, int x, int top, int bottom, int w);
+    ImageBox draw_subject_modal(const SubjectPreview& pv, int scroll);
+    void draw_action_menu(const std::vector<std::pair<std::string, bool>>& items, int sel);
+
+    std::vector<Hitbox> hitboxes_;
+    ImageBox            preview_img_;
+
+    int cols_{80};
+    int rows_{24};
+};
