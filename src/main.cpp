@@ -8,10 +8,12 @@
 #include "image_renderer.hpp"
 #include "clipboard.hpp"
 #include "pdf_preview.hpp"
+#include "i18n.hpp"
 
 #include <ncurses.h>
 #include <string>
 #include <cctype>
+#include <cstdio>
 #include <iostream>
 #include <chrono>
 #include <ctime>
@@ -82,12 +84,13 @@ static void print_help(const char* prog) {
               << "  D / x                    Delete entire slot block\n"
               << "  s                        Create slot (+offset) / Download PDF subject\n"
               << "  t                        Open interactive Theme Chooser modal\n"
+              << "  Esc                      Open the main menu (Settings, Help, Resume, Quit)\n"
               << "  r                        Refresh/sync data from intra\n"
               << "  p                        Open downloaded subject preview (Roadmap)\n"
               << "  Enter                    Project action menu (preview / external / download)\n"
               << "  y                        Copy selected cluster user's login to clipboard\n"
               << "  Mouse                    Click tabs/lists/desks; wheel scrolls; right-click copies login\n"
-              << "  q                        Quit application\n";
+              << "  q                        Quit application (press twice to confirm)\n";
 }
 
 static void list_themes() {
@@ -100,6 +103,19 @@ static void list_themes() {
         if (i == 0) std::cout << " (Default)";
         std::cout << "\n";
     }
+}
+
+// Cycle a string value through a list of options (dir = -1 / +1).
+static std::string cycle_choice(const std::vector<std::string>& options,
+                                const std::string& current, int dir) {
+    if (options.empty()) return current;
+    int idx = 0;
+    for (int i = 0; i < (int)options.size(); ++i) {
+        if (options[i] == current) { idx = i; break; }
+    }
+    idx = (idx + dir) % (int)options.size();
+    if (idx < 0) idx += (int)options.size();
+    return options[idx];
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -178,7 +194,14 @@ int main(int argc, char* argv[]) {
     NetworkWorker  worker(state);
     Renderer       renderer;
 
-    Tab  current_tab  = Tab::Dashboard;
+    auto tab_from_code = [](const std::string& code) -> Tab {
+        if (code == "roadmap") return Tab::Roadmap;
+        if (code == "slots")   return Tab::Slots;
+        if (code == "cluster") return Tab::Cluster;
+        return Tab::Dashboard;
+    };
+
+    Tab  current_tab  = tab_from_code(Config::get().start_tab);
     Tab  prev_tab     = Tab::Dashboard;
     int  dash_subview = 0; // 0: Overview, 1: Scale Teams, 2: Points & Pool
     int  dash_sel     = 0;
@@ -319,6 +342,27 @@ int main(int argc, char* argv[]) {
     std::string action_target;               // project name for the action menu
     std::vector<std::pair<std::string, bool>> action_items;
 
+    // Esc (pause) menu state
+    MenuState menu;
+    Config    settings_saved;                // snapshot for dirty tracking / discard
+    bool      quit_armed = false;
+    std::chrono::steady_clock::time_point quit_armed_at;
+
+    enum class ConfirmKind { None, Logout, DiscardSettings };
+    ConfirmKind confirm_kind = ConfirmKind::None;
+    int         edit_setting = -1;           // settings row currently being edited
+
+    // Settings row indices
+    enum {
+        SET_THEME = 0, SET_BORDER, SET_OFFSET, SET_DURATION, SET_GLOW,
+        SET_COOKIE, SET_START_TAB, SET_CONFIRM_QUIT, SET_LANGUAGE, SET_SAVE
+    };
+    // Root menu row indices
+    enum {
+        ROOT_RESUME = 0, ROOT_SETTINGS, ROOT_THEME, ROOT_HELP,
+        ROOT_ABOUT, ROOT_LOGOUT, ROOT_QUIT
+    };
+
     auto open_action_menu = [&](const std::string& name) {
         if (name.empty()) return;
         action_target = name;
@@ -456,6 +500,200 @@ int main(int argc, char* argv[]) {
     std::string cookie_buf;
     std::string detected_file = network::find_available_cookie_file();
 
+    // ── Esc menu helpers ──────────────────────────────────────────────────────
+    const std::vector<std::string> kBorderStyles = { "rounded", "sharp", "double" };
+    const std::vector<std::string> kTabCodes     = { "dashboard", "roadmap", "slots", "cluster" };
+    const std::vector<std::string> kLangCodes    = { "en", "es" };
+
+    auto refresh_dirty = [&]() {
+        const Config& c = Config::get();
+        menu.dirty = c.theme            != settings_saved.theme          ||
+                     c.border_style     != settings_saved.border_style   ||
+                     c.offset_minutes   != settings_saved.offset_minutes ||
+                     c.default_duration != settings_saved.default_duration ||
+                     c.enable_box_glow  != settings_saved.enable_box_glow ||
+                     c.cookie_path      != settings_saved.cookie_path    ||
+                     c.start_tab        != settings_saved.start_tab      ||
+                     c.confirm_quit     != settings_saved.confirm_quit   ||
+                     c.language         != settings_saved.language;
+    };
+
+    auto build_root_menu = [&]() {
+        menu.root_items = {
+            { i18n::tr("resume"),        "", "",  true, false, false },
+            { i18n::tr("settings"),      "", "s", true, false, false },
+            { i18n::tr("theme_chooser"), "", "t", true, false, false },
+            { i18n::tr("help"),          "", "h", true, false, false },
+            { i18n::tr("about"),         "", "a", true, false, false },
+            { i18n::tr("logout"),        "", "l", true, false, false },
+            { i18n::tr("quit"),          "", "q", true, false, false },
+        };
+    };
+
+    auto build_settings_menu = [&]() {
+        const Config& c = Config::get();
+        const std::string border_label = i18n::tr("border_" + c.border_style);
+        const std::string tab_label    = i18n::tr("tab_" + c.start_tab);
+        const std::string lang_label   = (c.language == "es") ? i18n::tr("lang_es")
+                                                              : i18n::tr("lang_en");
+        menu.settings_items = {
+            { i18n::tr("set_theme"),        theme::get_theme(c.theme).display_name, "", true, c.theme            != settings_saved.theme,          false },
+            { i18n::tr("set_border"),       border_label,                          "", true, c.border_style     != settings_saved.border_style,   false },
+            { i18n::tr("set_offset"),       std::to_string(c.offset_minutes),      "", true, c.offset_minutes   != settings_saved.offset_minutes, false },
+            { i18n::tr("set_duration"),     std::to_string(c.default_duration),    "", true, c.default_duration != settings_saved.default_duration, false },
+            { i18n::tr("set_glow"),         i18n::tr(c.enable_box_glow ? "on" : "off"), "", true, c.enable_box_glow != settings_saved.enable_box_glow, false },
+            { i18n::tr("set_cookie"),       Config::get_effective_cookie_path(),   "", true, c.cookie_path      != settings_saved.cookie_path,    false },
+            { i18n::tr("set_start_tab"),    tab_label,                             "", true, c.start_tab        != settings_saved.start_tab,      false },
+            { i18n::tr("set_confirm_quit"), i18n::tr(c.confirm_quit ? "on" : "off"), "", true, c.confirm_quit   != settings_saved.confirm_quit,   false },
+            { i18n::tr("set_language"),     lang_label,                            "", true, c.language         != settings_saved.language,       false },
+            { i18n::tr("save"),             "", "s", true, false, true },
+        };
+    };
+
+    auto open_menu = [&]() {
+        menu.page         = MenuPage::Root;
+        menu.sel          = ROOT_RESUME;
+        menu.scroll       = 0;
+        menu.dirty        = false;
+        menu.confirm_open = false;
+        menu.edit_open    = false;
+    };
+
+    auto open_settings = [&]() {
+        settings_saved = Config::get();
+        menu.page      = MenuPage::Settings;
+        menu.sel       = SET_THEME;
+        menu.scroll    = 0;
+        menu.dirty     = false;
+    };
+
+    auto save_settings = [&]() {
+        Config::get().save();
+        settings_saved = Config::get();
+        refresh_dirty();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.status_msg = i18n::tr("msg_settings_saved");
+    };
+
+    auto discard_settings = [&]() {
+        Config::get() = settings_saved;
+        theme::apply_theme_to_ncurses(theme::get_theme(Config::get().theme));
+        refresh_dirty();
+        std::lock_guard<std::mutex> lk(state.mtx);
+        state.status_msg = i18n::tr("msg_settings_discarded");
+    };
+
+    auto adjust_setting = [&](int idx, int dir) {
+        Config& c = Config::get();
+        switch (idx) {
+            case SET_THEME: {
+                const auto& all = theme::get_all_themes();
+                int cur = theme::get_theme_index(c.theme);
+                int nx  = (cur + dir) % (int)all.size();
+                if (nx < 0) nx += (int)all.size();
+                c.theme = all[nx].id;
+                theme::apply_theme_to_ncurses(all[nx]);
+                break;
+            }
+            case SET_BORDER:       c.border_style     = cycle_choice(kBorderStyles, c.border_style, dir); break;
+            case SET_OFFSET:       c.offset_minutes   = std::clamp(c.offset_minutes + dir * 5, 0, 600); break;
+            case SET_DURATION:     c.default_duration = std::clamp(c.default_duration + dir * 5, 5, 600); break;
+            case SET_GLOW:         c.enable_box_glow  = !c.enable_box_glow; break;
+            case SET_START_TAB:    c.start_tab        = cycle_choice(kTabCodes, c.start_tab, dir); break;
+            case SET_CONFIRM_QUIT: c.confirm_quit     = !c.confirm_quit; break;
+            case SET_LANGUAGE:     c.language         = cycle_choice(kLangCodes, c.language, dir); break;
+            default: break;
+        }
+        refresh_dirty();
+    };
+
+    auto open_edit = [&](int idx) {
+        Config& c = Config::get();
+        if (idx == SET_OFFSET) {
+            edit_setting   = idx;
+            menu.edit_title = i18n::tr("set_offset");
+            menu.edit_value = std::to_string(c.offset_minutes);
+            menu.edit_open  = true;
+        } else if (idx == SET_DURATION) {
+            edit_setting   = idx;
+            menu.edit_title = i18n::tr("set_duration");
+            menu.edit_value = std::to_string(c.default_duration);
+            menu.edit_open  = true;
+        } else if (idx == SET_COOKIE) {
+            edit_setting   = idx;
+            menu.edit_title = i18n::tr("set_cookie");
+            menu.edit_value = c.cookie_path;
+            menu.edit_open  = true;
+        }
+    };
+
+    auto commit_edit = [&]() {
+        Config& c = Config::get();
+        try {
+            if (edit_setting == SET_OFFSET)
+                c.offset_minutes = std::clamp(std::stoi(menu.edit_value), 0, 600);
+            else if (edit_setting == SET_DURATION)
+                c.default_duration = std::clamp(std::stoi(menu.edit_value), 5, 600);
+            else if (edit_setting == SET_COOKIE)
+                c.cookie_path = menu.edit_value;
+        } catch (...) {}
+        menu.edit_open = false;
+        edit_setting   = -1;
+        refresh_dirty();
+    };
+
+    auto try_quit = [&]() {
+        if (!Config::get().confirm_quit) { g_quit.store(true); return; }
+        auto now = std::chrono::steady_clock::now();
+        if (quit_armed && (now - quit_armed_at) < std::chrono::seconds(3)) {
+            g_quit.store(true);
+        } else {
+            quit_armed    = true;
+            quit_armed_at = now;
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.status_msg = i18n::tr("msg_quit_armed");
+        }
+    };
+
+    auto do_logout = [&]() {
+        const std::string cookie = Config::get_effective_cookie_path();
+        if (!cookie.empty()) std::remove(cookie.c_str());
+        {
+            std::lock_guard<std::mutex> lk(state.mtx);
+            state.profile = Profile{};
+            state.cluster_profiles.clear();
+            state.preview = SubjectPreview{};
+            state.data_ready = false;
+            state.loading    = false;
+            state.error_msg.clear();
+            state.status_msg = i18n::tr("msg_logged_out");
+        }
+        login_mode = true;
+        image_renderer::clear_kitty_images();
+    };
+
+    auto activate_root_menu = [&]() {
+        switch (menu.sel) {
+            case ROOT_RESUME:   menu.page = MenuPage::None; break;
+            case ROOT_SETTINGS: open_settings(); break;
+            case ROOT_THEME:
+                theme_sel = theme::get_theme_index(Config::get().theme);
+                prev_theme = Config::get().theme;
+                theme_switcher_open = true;
+                break;
+            case ROOT_HELP:     menu.page = MenuPage::Help; menu.scroll = 0; break;
+            case ROOT_ABOUT:    menu.page = MenuPage::About; break;
+            case ROOT_LOGOUT:
+                menu.confirm_open   = true;
+                confirm_kind        = ConfirmKind::Logout;
+                menu.confirm_title  = i18n::tr("logout_confirm_title");
+                menu.confirm_msg    = i18n::tr("logout_confirm_msg");
+                break;
+            case ROOT_QUIT:     menu.page = MenuPage::None; try_quit(); break;
+            default: break;
+        }
+    };
+
     // ── Session detection on startup ──────────────────────────────────────────
     // New behaviour: a cached session cookie + cached profile data lets us boot
     // straight into the dashboard and sync in the background. The login screen is
@@ -578,7 +816,14 @@ int main(int argc, char* argv[]) {
         rebuild_search_results();
         bool preview_panel = !login_mode && !subject_modal_open &&
                              !action_menu_open && !theme_switcher_open &&
+                             menu.page == MenuPage::None &&
                              (current_tab == Tab::Roadmap);
+
+        // Refresh the menu contents (labels/values) right before drawing.
+        if (menu.page != MenuPage::None) {
+            build_root_menu();
+            if (menu.page == MenuPage::Settings) build_settings_menu();
+        }
 
         // Draw the current frame
         renderer.draw(state, current_tab,
@@ -593,16 +838,168 @@ int main(int argc, char* argv[]) {
                       action_menu_open, action_items, action_menu_sel,
                       minimap_hover,
                       user_modal_open, user_modal_login,
-                      search);
+                      search, menu);
 
         int ch = getch();
         if (ch == ERR) continue;
+
+        // Any key other than q disarms the pending quit confirmation.
+        if (ch != 'q' && ch != 'Q') quit_armed = false;
 
         // Resize event
         if (ch == KEY_RESIZE) {
             image_renderer::clear_kitty_images();
             renderer.refresh_now();
             continue;
+        }
+
+        // ── Esc menu (pause menu) input handling ──────────────────────────────
+        if (menu.page != MenuPage::None) {
+            // Single-value edit popup
+            if (menu.edit_open) {
+                if (ch == 27) { menu.edit_open = false; edit_setting = -1; continue; }
+                if (ch == '\n' || ch == KEY_ENTER) { commit_edit(); continue; }
+                if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+                    if (!menu.edit_value.empty()) menu.edit_value.pop_back();
+                    continue;
+                }
+                if (ch >= 32 && ch < 127) {
+                    menu.edit_value += static_cast<char>(ch);
+                }
+                continue;
+            }
+
+            // Confirmation dialog
+            if (menu.confirm_open) {
+                if (ch == KEY_MOUSE) {
+                    MEVENT ev;
+                    if (getmouse(&ev) == OK &&
+                        (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED))) {
+                        MouseHit hit = renderer.hit_test(ev.y, ev.x);
+                        if (hit.action == MouseAction::ConfirmChoice) {
+                            ch = (hit.index == 0) ? 'y' : 'n';
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                if (ch == 'y' || ch == 'Y') {
+                    ConfirmKind kind = confirm_kind;
+                    menu.confirm_open = false;
+                    confirm_kind      = ConfirmKind::None;
+                    if (kind == ConfirmKind::Logout) {
+                        menu.page = MenuPage::None;
+                        do_logout();
+                    } else if (kind == ConfirmKind::DiscardSettings) {
+                        discard_settings();
+                        menu.page = MenuPage::Root;
+                    }
+                    continue;
+                }
+                if (ch == 'n' || ch == 'N' || ch == 27 || ch == 'q' || ch == 'Q') {
+                    menu.confirm_open = false;
+                    confirm_kind      = ConfirmKind::None;
+                    continue;
+                }
+                continue;
+            }
+
+            // Mouse (all menu pages)
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                if (getmouse(&ev) == OK) {
+                    if (ev.bstate & (BUTTON4_PRESSED | BUTTON4_CLICKED)) {
+                        if (menu.page == MenuPage::Help)
+                            menu.scroll = std::max(0, menu.scroll - 1);
+                        else if (menu.sel > 0 && menu.page != MenuPage::About)
+                            menu.sel--;
+                    } else if (ev.bstate & (BUTTON5_PRESSED | BUTTON5_CLICKED)) {
+                        if (menu.page == MenuPage::Help)
+                            menu.scroll++;
+                        else if (menu.page == MenuPage::Root &&
+                                 menu.sel + 1 < (int)menu.root_items.size())
+                            menu.sel++;
+                        else if (menu.page == MenuPage::Settings &&
+                                 menu.sel + 1 < (int)menu.settings_items.size())
+                            menu.sel++;
+                    } else if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED)) {
+                        MouseHit hit = renderer.hit_test(ev.y, ev.x);
+                        if (hit.action == MouseAction::MenuItem &&
+                            hit.index >= 0 && hit.index < (int)menu.root_items.size()) {
+                            menu.sel = hit.index;
+                            activate_root_menu();
+                        } else if (hit.action == MouseAction::SettingsRow &&
+                                   hit.index >= 0 && hit.index < (int)menu.settings_items.size()) {
+                            menu.sel = hit.index;
+                            if (menu.sel == SET_SAVE) save_settings();
+                            else open_edit(menu.sel);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Keyboard — Root
+            if (menu.page == MenuPage::Root) {
+                const int n = (int)menu.root_items.size();
+                if (ch == 'j' || ch == KEY_DOWN) { menu.sel = (menu.sel + 1) % n; continue; }
+                if (ch == 'k' || ch == KEY_UP)   { menu.sel = (menu.sel + n - 1) % n; continue; }
+                if (ch == '\n' || ch == KEY_ENTER) { activate_root_menu(); continue; }
+                if (ch == 27) { menu.page = MenuPage::None; continue; }
+                switch (ch) {
+                    case 's': case 'S': menu.sel = ROOT_SETTINGS;     activate_root_menu(); break;
+                    case 't': case 'T': menu.sel = ROOT_THEME;        activate_root_menu(); break;
+                    case 'h': case 'H': menu.sel = ROOT_HELP;         activate_root_menu(); break;
+                    case 'a': case 'A': menu.sel = ROOT_ABOUT;        activate_root_menu(); break;
+                    case 'l': case 'L': menu.sel = ROOT_LOGOUT;       activate_root_menu(); break;
+                    case 'q': case 'Q': menu.sel = ROOT_QUIT;         activate_root_menu(); break;
+                    default: break;
+                }
+                continue;
+            }
+
+            // Keyboard — Settings
+            if (menu.page == MenuPage::Settings) {
+                const int n = (int)menu.settings_items.size();
+                if (ch == 'j' || ch == KEY_DOWN) { menu.sel = (menu.sel + 1) % n; continue; }
+                if (ch == 'k' || ch == KEY_UP)   { menu.sel = (menu.sel + n - 1) % n; continue; }
+                if (ch == 'h' || ch == KEY_LEFT)  { adjust_setting(menu.sel, -1); continue; }
+                if (ch == 'l' || ch == KEY_RIGHT) { adjust_setting(menu.sel, +1); continue; }
+                if (ch == 's' || ch == 'S') { save_settings(); continue; }
+                if (ch == '\n' || ch == KEY_ENTER) {
+                    if (menu.sel == SET_SAVE) save_settings();
+                    else open_edit(menu.sel);
+                    continue;
+                }
+                if (ch == 27) {
+                    if (menu.dirty) {
+                        menu.confirm_open  = true;
+                        confirm_kind       = ConfirmKind::DiscardSettings;
+                        menu.confirm_title = i18n::tr("discard_confirm_title");
+                        menu.confirm_msg   = i18n::tr("discard_confirm_msg");
+                    } else {
+                        menu.page = MenuPage::Root;
+                    }
+                    continue;
+                }
+                continue;
+            }
+
+            // Keyboard — Help
+            if (menu.page == MenuPage::Help) {
+                if (ch == 'j' || ch == KEY_DOWN)  { menu.scroll++; continue; }
+                if (ch == 'k' || ch == KEY_UP)    { menu.scroll = std::max(0, menu.scroll - 1); continue; }
+                if (ch == KEY_NPAGE)              { menu.scroll += 10; continue; }
+                if (ch == KEY_PPAGE)              { menu.scroll = std::max(0, menu.scroll - 10); continue; }
+                if (ch == 27 || ch == '\n' || ch == KEY_ENTER) { menu.page = MenuPage::Root; continue; }
+                continue;
+            }
+
+            // Keyboard — About
+            if (menu.page == MenuPage::About) {
+                if (ch == 27 || ch == '\n' || ch == KEY_ENTER) { menu.page = MenuPage::Root; continue; }
+                continue;
+            }
         }
 
         // ── Full-screen user profile modal ────────────────────────────────────
@@ -1063,7 +1460,7 @@ int main(int argc, char* argv[]) {
                 dash_inspect = false;
                 break;
             }
-            g_quit.store(true);
+            try_quit();
             break;
 
         case 27: // Escape
@@ -1071,6 +1468,7 @@ int main(int argc, char* argv[]) {
                 dash_inspect = false;
                 break;
             }
+            open_menu();
             break;
 
         case 'f':

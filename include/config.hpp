@@ -16,6 +16,9 @@ struct Config {
 
     // [ui]
     bool enable_box_glow = false;
+    std::string language = "en";       // "en", "es"
+    std::string start_tab = "dashboard"; // dashboard, roadmap, slots, cluster
+    bool confirm_quit    = true;       // require pressing q twice to quit
 
     // Singleton access
     static Config& get();

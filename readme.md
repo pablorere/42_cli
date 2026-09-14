@@ -70,6 +70,26 @@ Launch the installed binary without updating:
 make run
 ```
 
+## Main menu (Esc)
+
+Press `Esc` during normal navigation to open a centered menu:
+
+- **Resume** (`Esc`) — close the menu and go back
+- **Settings** (`s`) — edit theme, border style, slot offset, default duration,
+  box glow, cookie path, startup tab, quit confirmation and language. Changes
+  are staged with a `*` marker and written to `config.ini` only via **Save**
+  (or `s`); leaving with unsaved changes asks to discard them.
+- **Theme chooser** (`t`) — the quick live-preview theme switcher
+- **Help** (`h`) — scrollable keybinding reference
+- **About** (`a`) — version (from the latest git tag), repo, license, paths and
+  dependency versions
+- **Logout / switch account** (`l`) — confirm, delete the session cookie and
+  return to the login screen
+- **Quit** (`q`) — quit, requiring a second `q` by default
+
+`Esc` closes the innermost thing first: it cancels search/inspection, then
+closes a modal, and only opens the menu from normal navigation.
+
 ## CLI options
 
 ```text
@@ -110,6 +130,7 @@ Fallbacks when XDG variables are missing:
 - `Tab` / `Shift-Tab` / `gt` / `gT`: switch tabs
 - `1..4`: jump to Dashboard, Roadmap, Slots, Cluster
 - `/`: focus the global search bar (Esc to leave); type to filter online users and projects, `Enter` opens
+- `Esc`: open the main menu (Settings / Help / Resume / Quit); Esc again resumes
 - `s`: create slot or download subject (context dependent)
 - `d`: trim last 15 minutes from selected slot
 - `D` / `x`: delete selected slot block
@@ -118,7 +139,7 @@ Fallbacks when XDG variables are missing:
 - `p`: open subject preview
 - `y`: copy selected cluster login
 - `Enter` on Cluster: open the selected user's profile screen
-- `q`: quit
+- `q`: quit (press twice to confirm; toggle in Settings)
 
 ## License
 

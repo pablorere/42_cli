@@ -4,10 +4,26 @@ NAME    := 42_cli
 CXX     := g++
 CXXFLAGS := -std=c++20 -Wall -Wextra -Werror -pedantic -O2
 CXXFLAGS += -I./include
+CXXFLAGS += -I./curl_dev_tmp/usr/include
 CXXFLAGS += -I./curl_dev_tmp/usr/include/x86_64-linux-gnu
 CXXFLAGS += -MMD -MP
 
-LDFLAGS := -L./curl_dev_tmp/usr/lib/x86_64-linux-gnu -lcurl -lncursesw -lpthread
+# Version info shown in the in-app About screen. Derived from the latest git
+# release tag (or commit) so tagging a release updates it automatically.
+APP_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0)
+APP_REPO    ?= $(shell git remote get-url origin 2>/dev/null || echo "")
+CXXFLAGS += -DAPP_VERSION='"$(APP_VERSION)"'
+CXXFLAGS += -DAPP_REPO='"$(APP_REPO)"'
+
+# Prefer a system libcurl (binary-compatible); fall back to the vendored copy.
+CURL_LIB := $(firstword $(wildcard /usr/lib/*/libcurl.so /usr/lib/*/libcurl.so.4))
+ifeq ($(CURL_LIB),)
+CURL_LDFLAGS := -L./curl_dev_tmp/usr/lib/x86_64-linux-gnu -lcurl
+else
+CURL_LDFLAGS := $(CURL_LIB)
+endif
+
+LDFLAGS := -L./curl_dev_tmp/usr/lib/x86_64-linux-gnu $(CURL_LDFLAGS) -lncursesw -lpthread
 
 PREFIX  ?= $(HOME)/.local
 BINDIR  ?= $(PREFIX)/bin

@@ -4,8 +4,11 @@
 #include "config.hpp"
 #include "image_renderer.hpp"
 #include "network.hpp"
+#include "i18n.hpp"
+#include "version.hpp"
 
 #include <ncurses.h>
+#include <curl/curl.h>
 #include <clocale>
 #include <string>
 #include <vector>
@@ -336,7 +339,8 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                     int minimap_hover,
                     bool user_modal_open,
                     const std::string& user_modal_login,
-                    const SearchState& search)
+                    const SearchState& search,
+                    MenuState& menu)
 {
     getmaxyx(stdscr, rows_, cols_);
     erase();
@@ -408,6 +412,7 @@ void Renderer::draw(SharedState& state, Tab current_tab,
     // Floating cluster inspector for the hovered dashboard minimap desk.
     if (!login_mode && data_ready && current_tab == Tab::Dashboard &&
         !theme_switcher_open && !subject_modal && !action_menu_open && !user_modal_open &&
+        menu.page == MenuPage::None &&
         !search.focus &&
         minimap_hover_ >= 0 && minimap_hover_box_.valid) {
         draw_cluster_tooltip(prof, cluster_profiles, content_top, content_bottom, left_w);
@@ -431,6 +436,20 @@ void Renderer::draw(SharedState& state, Tab current_tab,
     if (!login_mode && user_modal_open && !user_modal_login.empty()) {
         curs_set(0);
         draw_user_modal(prof, cluster_profiles, user_modal_login);
+    }
+
+    // Esc menu (drawn above the base screen; theme chooser wins if both are up).
+    if (!login_mode && menu.page != MenuPage::None && !theme_switcher_open) {
+        curs_set(0);
+        switch (menu.page) {
+            case MenuPage::Root:     draw_main_menu(menu); break;
+            case MenuPage::Settings: draw_settings(menu);  break;
+            case MenuPage::Help:     draw_help(menu);      break;
+            case MenuPage::About:    draw_about();         break;
+            case MenuPage::None:     break;
+        }
+        if (menu.confirm_open) draw_confirm_dialog(menu);
+        if (menu.edit_open)    draw_edit_popup(menu);
     }
 
     refresh();
@@ -2122,6 +2141,273 @@ void Renderer::draw_theme_switcher(int active_idx) {
     attron(COLOR_PAIR(CP_DIM));
     std::string footer = "Persists to " + Config::get_config_file_path();
     mvprint_clip(fy + 1, bx + (box_w - (int)footer.size()) / 2, footer, box_w - 4);
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Esc menu (pause menu) + Settings / Help / About sub-screens
+// ─────────────────────────────────────────────────────────────────────────────
+static void draw_modal_frame(int by, int bx, int box_h, int box_w,
+                             const std::string& title) {
+    const auto& bc = get_border_chars();
+
+    attron(COLOR_PAIR(CP_MODAL_BG));
+    for (int r = by; r < by + box_h; ++r) fill_row(r, bx, box_w);
+    attroff(COLOR_PAIR(CP_MODAL_BG));
+
+    attron(COLOR_PAIR(CP_BORDER) | A_BOLD);
+    mvaddstr(by, bx, bc.tl);
+    hline_box(by, bx + 1, box_w - 2);
+    mvaddstr(by, bx + box_w - 1, bc.tr);
+    for (int r = by + 1; r < by + box_h - 1; ++r) {
+        mvaddstr(r, bx, bc.v);
+        mvaddstr(r, bx + box_w - 1, bc.v);
+    }
+    mvaddstr(by + box_h - 1, bx, bc.bl);
+    hline_box(by + box_h - 1, bx + 1, box_w - 2);
+    mvaddstr(by + box_h - 1, bx + box_w - 1, bc.br);
+    attroff(COLOR_PAIR(CP_BORDER) | A_BOLD);
+
+    if (!title.empty()) {
+        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+        mvprint_clip(by, bx + (box_w - (int)title.size()) / 2, title, box_w - 2);
+        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    }
+}
+
+void Renderer::draw_main_menu(MenuState& menu) {
+    const auto& items = menu.root_items;
+    const int n = (int)items.size();
+    int bw = 56;
+    if (bw > cols_ - 4) bw = cols_ - 4;
+    if (bw < 24) return;
+    const int bh = n + 4;
+    const int bx = (cols_ - bw) / 2;
+    int by = (rows_ - bh) / 2;
+    if (by < 0) by = 0;
+
+    draw_modal_frame(by, bx, bh, bw, i18n::tr("menu_title"));
+
+    for (int i = 0; i < n; ++i) {
+        const int ry = by + 1 + i;
+        const bool active = (i == menu.sel);
+        add_hitbox(ry, bx + 1, 1, bw - 2, MouseAction::MenuItem, i);
+
+        std::string text = items[i].label;
+        if (!items[i].shortcut.empty())
+            text = "[" + items[i].shortcut + "] " + text;
+
+        if (active) {
+            attron(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
+            fill_row(ry, bx + 1, bw - 2);
+            mvprint_clip(ry, bx + 3, "▶ " + text, bw - 5);
+            attroff(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
+        } else {
+            const int cp = items[i].enabled ? CP_VALUE : CP_DIM;
+            attron(COLOR_PAIR(cp));
+            mvprint_clip(ry, bx + 5, text, bw - 7);
+            attroff(COLOR_PAIR(cp));
+        }
+    }
+
+    attron(COLOR_PAIR(CP_DIM));
+    const std::string footer = i18n::tr("menu_footer");
+    mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 2);
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+void Renderer::draw_settings(MenuState& menu) {
+    const auto& items = menu.settings_items;
+    const int n = (int)items.size();
+    int bw = 68;
+    if (bw > cols_ - 4) bw = cols_ - 4;
+    if (bw < 30) return;
+    int bh = n + 4;
+    const int max_h = rows_ - 2;
+    if (bh > max_h) bh = max_h;
+    if (bh < 6) return;
+    const int bx = (cols_ - bw) / 2;
+    int by = (rows_ - bh) / 2;
+    if (by < 0) by = 0;
+
+    const int visible = bh - 2;
+    if (menu.sel < menu.scroll) menu.scroll = menu.sel;
+    if (menu.sel >= menu.scroll + visible) menu.scroll = menu.sel - visible + 1;
+    if (menu.scroll < 0) menu.scroll = 0;
+    if (n > visible && menu.scroll > n - visible) menu.scroll = n - visible;
+
+    draw_modal_frame(by, bx, bh, bw, i18n::tr("settings_title"));
+
+    for (int row = 0; row < visible; ++row) {
+        const int idx = menu.scroll + row;
+        if (idx >= n) break;
+        const int ry = by + 1 + row;
+        const MenuEntry& e = items[idx];
+        const bool active = (idx == menu.sel);
+        add_hitbox(ry, bx + 1, 1, bw - 2, MouseAction::SettingsRow, idx);
+
+        const int base_cp = e.is_save ? CP_SUCCESS : (e.enabled ? CP_VALUE : CP_DIM);
+        if (active) {
+            attron(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
+            fill_row(ry, bx + 1, bw - 2);
+            attroff(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
+        } else {
+            attron(COLOR_PAIR(CP_MODAL_BG));
+            fill_row(ry, bx + 1, bw - 2);
+            attroff(COLOR_PAIR(CP_MODAL_BG));
+        }
+
+        attron(COLOR_PAIR(base_cp) | (active ? A_BOLD : 0));
+        mvprint_clip(ry, bx + 3, (active ? "▶ " : "  ") + e.label, bw / 2 + 4);
+        attroff(COLOR_PAIR(base_cp) | (active ? A_BOLD : 0));
+
+        if (!e.value.empty()) {
+            std::string v = e.value;
+            if (e.modified) v += " *";
+            int vx = bx + bw - 2 - (int)v.size();
+            if (vx < bx + bw / 2 + 2) vx = bx + bw / 2 + 2;
+            const int vcp = e.modified ? CP_WARN : CP_LABEL;
+            attron(COLOR_PAIR(vcp) | (active ? A_BOLD : 0));
+            mvprint_clip(ry, vx, v, bx + bw - 1 - vx);
+            attroff(COLOR_PAIR(vcp) | (active ? A_BOLD : 0));
+        }
+    }
+
+    attron(COLOR_PAIR(CP_DIM));
+    const std::string footer = i18n::tr(menu.dirty ? "settings_footer_dirty" : "settings_footer");
+    mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 2);
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+void Renderer::draw_help(MenuState& menu) {
+    const auto& lines = i18n::help_lines();
+    const int n = (int)lines.size();
+    int bw = cols_ - 6;
+    if (bw > 78) bw = 78;
+    if (bw < 30) bw = cols_ - 2;
+    int bh = rows_ - 4;
+    if (bh < 6) bh = rows_ - 2;
+    const int bx = (cols_ - bw) / 2;
+    int by = (rows_ - bh) / 2;
+    if (by < 0) by = 0;
+
+    const int visible = bh - 2;
+    if (menu.scroll < 0) menu.scroll = 0;
+    if (n > visible && menu.scroll > n - visible) menu.scroll = n - visible;
+
+    draw_modal_frame(by, bx, bh, bw, i18n::tr("help_title"));
+
+    for (int row = 0; row < visible; ++row) {
+        const int idx = menu.scroll + row;
+        if (idx >= n) break;
+        const int ry = by + 1 + row;
+        const std::string& ln = lines[idx];
+        const bool header = !ln.empty() && ln[0] != ' ';
+        const int cp = header ? CP_TITLE : CP_VALUE;
+        attron(COLOR_PAIR(cp) | (header ? A_BOLD : 0));
+        mvprint_clip(ry, bx + 2, ln, bw - 4);
+        attroff(COLOR_PAIR(cp) | (header ? A_BOLD : 0));
+    }
+
+    attron(COLOR_PAIR(CP_DIM));
+    const std::string footer = i18n::tr("help_footer");
+    mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 2);
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+void Renderer::draw_about() {
+    std::vector<std::pair<std::string, std::string>> rows = {
+        {i18n::tr("about_version"), APP_VERSION},
+        {i18n::tr("about_repo"),    APP_REPO[0] ? std::string(APP_REPO) : std::string("—")},
+        {i18n::tr("about_license"), APP_LICENSE},
+        {i18n::tr("about_config"),  Config::get_config_file_path()},
+        {i18n::tr("about_data"),    Config::get_data_dir()},
+        {i18n::tr("about_curl"),    std::string(curl_version())},
+        {i18n::tr("about_ncurses"), std::string(curses_version())},
+    };
+
+    int bw = 68;
+    if (bw > cols_ - 4) bw = cols_ - 4;
+    if (bw < 30) return;
+    const int bh = (int)rows.size() + 4;
+    const int bx = (cols_ - bw) / 2;
+    int by = (rows_ - bh) / 2;
+    if (by < 0) by = 0;
+
+    draw_modal_frame(by, bx, bh, bw, i18n::tr("about_title"));
+
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        const int ry = by + 1 + i;
+        attron(COLOR_PAIR(CP_LABEL) | A_BOLD);
+        mvprint_clip(ry, bx + 3, rows[i].first, 20);
+        attroff(COLOR_PAIR(CP_LABEL) | A_BOLD);
+        attron(COLOR_PAIR(CP_VALUE));
+        mvprint_clip(ry, bx + 24, rows[i].second, bw - 26);
+        attroff(COLOR_PAIR(CP_VALUE));
+    }
+
+    attron(COLOR_PAIR(CP_DIM));
+    const std::string footer = i18n::tr("about_footer");
+    mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 2);
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+void Renderer::draw_confirm_dialog(const MenuState& menu) {
+    int bw = 58;
+    if (bw > cols_ - 4) bw = cols_ - 4;
+    if (bw < 30) return;
+    const int bh = 7;
+    const int bx = (cols_ - bw) / 2;
+    int by = (rows_ - bh) / 2;
+    if (by < 0) by = 0;
+
+    draw_modal_frame(by, bx, bh, bw, menu.confirm_title);
+
+    attron(COLOR_PAIR(CP_VALUE));
+    mvprint_clip(by + 2, bx + 3, menu.confirm_msg, bw - 6);
+    attroff(COLOR_PAIR(CP_VALUE));
+
+    const std::string yes = "[Y] " + i18n::tr("yes");
+    const std::string no  = "[N] " + i18n::tr("no");
+    const int yx = bx + bw / 2 - 12;
+    const int nx = bx + bw / 2 + 4;
+    add_hitbox(by + 4, yx, 1, (int)yes.size(), MouseAction::ConfirmChoice, 0);
+    add_hitbox(by + 4, nx, 1, (int)no.size(),  MouseAction::ConfirmChoice, 1);
+
+    attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
+    mvprint_clip(by + 4, yx, yes, bw);
+    attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
+    attron(COLOR_PAIR(CP_FAIL) | A_BOLD);
+    mvprint_clip(by + 4, nx, no, bw);
+    attroff(COLOR_PAIR(CP_FAIL) | A_BOLD);
+
+    attron(COLOR_PAIR(CP_DIM));
+    const std::string footer = i18n::tr("confirm_footer");
+    mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 2);
+    attroff(COLOR_PAIR(CP_DIM));
+}
+
+void Renderer::draw_edit_popup(const MenuState& menu) {
+    int bw = 52;
+    if (bw > cols_ - 4) bw = cols_ - 4;
+    if (bw < 24) return;
+    const int bh = 6;
+    const int bx = (cols_ - bw) / 2;
+    int by = (rows_ - bh) / 2;
+    if (by < 0) by = 0;
+
+    draw_modal_frame(by, bx, bh, bw, menu.edit_title);
+
+    attron(COLOR_PAIR(CP_ROW_SEL));
+    fill_row(by + 2, bx + 2, bw - 4);
+    attroff(COLOR_PAIR(CP_ROW_SEL));
+    attron(COLOR_PAIR(CP_VALUE) | A_BOLD);
+    mvprint_clip(by + 2, bx + 3, menu.edit_value + "_", bw - 6);
+    attroff(COLOR_PAIR(CP_VALUE) | A_BOLD);
+
+    attron(COLOR_PAIR(CP_DIM));
+    const std::string footer = i18n::tr("edit_footer");
+    mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 2);
     attroff(COLOR_PAIR(CP_DIM));
 }
 

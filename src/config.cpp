@@ -124,6 +124,16 @@ bool Config::load(const std::string& path) {
                 std::string lower_val = val;
                 std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(), ::tolower);
                 enable_box_glow = (lower_val == "true" || lower_val == "1" || lower_val == "yes");
+            } else if (key == "language") {
+                language = val;
+                std::transform(language.begin(), language.end(), language.begin(), ::tolower);
+            } else if (key == "start_tab") {
+                start_tab = val;
+                std::transform(start_tab.begin(), start_tab.end(), start_tab.begin(), ::tolower);
+            } else if (key == "confirm_quit") {
+                std::string lower_val = val;
+                std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(), ::tolower);
+                confirm_quit = (lower_val == "true" || lower_val == "1" || lower_val == "yes");
             }
         }
     }
@@ -154,6 +164,9 @@ bool Config::save(const std::string& path) {
 
     out << "[ui]\n";
     out << "enable_box_glow = " << (enable_box_glow ? "true" : "false") << "\n";
+    out << "language = " << language << "\n";
+    out << "start_tab = " << start_tab << "\n";
+    out << "confirm_quit = " << (confirm_quit ? "true" : "false") << "\n";
 
     return true;
 }

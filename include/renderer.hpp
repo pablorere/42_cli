@@ -38,6 +38,40 @@ enum class MouseAction {
     LoginField,   // index = field (0-1)
     ThemeRow,     // index = theme (0-9)
     ActionRow,    // index = project action menu row
+    MenuItem,     // index = root menu row
+    SettingsRow,  // index = settings row (offset by scroll)
+    ConfirmChoice,// index = 0 (yes) / 1 (no)
+};
+
+// ─── Main (Esc) menu ──────────────────────────────────────────────────────────
+enum class MenuPage { None, Root, Settings, Help, About };
+
+struct MenuEntry {
+    std::string label;
+    std::string value;      // right-aligned value for settings rows
+    std::string shortcut;   // optional single-key hint shown in brackets
+    bool        enabled  = true;
+    bool        modified = false;
+    bool        is_save  = false;
+};
+
+struct MenuState {
+    MenuPage     page   = MenuPage::None;
+    int          sel    = 0;   // selected row (Root / Settings)
+    int          scroll = 0;   // first visible row / help scroll offset
+    bool         dirty  = false;
+    std::vector<MenuEntry> root_items;
+    std::vector<MenuEntry> settings_items;
+
+    // Confirmation dialog layered over the menu
+    bool        confirm_open  = false;
+    std::string confirm_title;
+    std::string confirm_msg;
+
+    // Single-value edit popup layered over the menu
+    bool        edit_open  = false;
+    std::string edit_title;
+    std::string edit_value;
 };
 
 struct MouseHit {
@@ -62,6 +96,9 @@ public:
      * Draw one full frame.
      * Takes a snapshot of SharedState under its mutex.
      */
+    // Shared do-nothing menu used when a caller omits the menu argument.
+    inline static MenuState default_menu_{};
+
     void draw(SharedState& state, Tab current_tab,
               int slot_sel, int tree_sel, int cluster_sel,
               bool login_mode, int login_method, int active_field,
@@ -80,7 +117,8 @@ public:
               int minimap_hover = -1,
               bool user_modal_open = false,
               const std::string& user_modal_login = std::string(),
-              const SearchState& search = SearchState{});
+              const SearchState& search = SearchState{},
+              MenuState& menu = default_menu_);
 
     void refresh_now();
 
@@ -132,6 +170,14 @@ private:
                            bool loading, const std::string& status_msg);
 
     void draw_theme_switcher(int active_idx);
+
+    // Esc menu + sub-screens
+    void draw_main_menu(MenuState& menu);
+    void draw_settings(MenuState& menu);
+    void draw_help(MenuState& menu);
+    void draw_about();
+    void draw_confirm_dialog(const MenuState& menu);
+    void draw_edit_popup(const MenuState& menu);
 
     // Subject (PDF) preview
     struct ImageBox { int row = 0, col = 0, w = 0, h = 0; bool visible = false; };
