@@ -15,6 +15,7 @@ enum class MouseAction {
     LoginMethod,  // index = login method (0-2)
     LoginField,   // index = field (0-1)
     ThemeRow,     // index = theme (0-9)
+    ActionRow,    // index = project action menu row
 };
 
 struct MouseHit {
@@ -51,6 +52,7 @@ public:
               const SubjectPreview& preview = SubjectPreview{},
               bool subject_modal = false,
               int subject_scroll = 0,
+              bool action_menu_open = false,
               const std::vector<std::pair<std::string, bool>>& action_items = {},
               int action_sel = 0);
 
@@ -113,6 +115,7 @@ private:
 
     std::vector<Hitbox> hitboxes_;
     ImageBox            preview_img_;
+    std::string         image_sig_;
 
     int cols_{80};
     int rows_{24};

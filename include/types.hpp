@@ -5,6 +5,7 @@
 #include <mutex>
 #include <functional>
 #include <cctype>
+#include <cstdlib>
 
 // ─── Tab indices ──────────────────────────────────────────────────────────────
 enum class Tab { Dashboard = 0, Projects = 1, Slots = 2, Roadmap = 3, Cluster = 4 };
@@ -90,17 +91,42 @@ namespace cluster_layout {
 
     // Nearest occupied desk to `from` in the given axis direction (dr,ds);
     // returns `from` unchanged when there is none.
+    //
+    // First it walks straight along the axis (same seat for vertical moves,
+    // same row for horizontal) so normal navigation feels natural. When the
+    // straight path is empty it falls back to the closest occupied desk in that
+    // general direction, which makes isolated desks reachable too.
     inline int nearest_occupied(const std::vector<ClusterStudent>& students,
                                 int room, int from, int dr, int ds) {
         if (from < 0) return first_occupied(students, room);
-        int r = row_of(from), s = seat_of(from);
         if (dr == 0 && ds == 0) return from;
+        int r = row_of(from), s = seat_of(from);
+
         for (int nr = r + dr, ns = s + ds;
              nr >= 0 && nr < ROWS && ns >= 0 && ns < SEATS;
              nr += dr, ns += ds) {
             if (occupied(students, room, nr, ns)) return index(nr, ns);
         }
-        return from;
+
+        int best = -1, best_primary = 0, best_secondary = 0;
+        for (int i = 0; i < CELLS; ++i) {
+            int nr = row_of(i), ns = seat_of(i);
+            if (!occupied(students, room, nr, ns)) continue;
+            if (dr > 0 && nr <= r) continue;
+            if (dr < 0 && nr >= r) continue;
+            if (ds > 0 && ns <= s) continue;
+            if (ds < 0 && ns >= s) continue;
+
+            int primary   = (dr != 0) ? std::abs(nr - r) : std::abs(ns - s);
+            int secondary = (dr != 0) ? std::abs(ns - s) : std::abs(nr - r);
+            if (best < 0 || primary < best_primary ||
+                (primary == best_primary && secondary < best_secondary)) {
+                best           = i;
+                best_primary   = primary;
+                best_secondary = secondary;
+            }
+        }
+        return best >= 0 ? best : from;
     }
 }
 

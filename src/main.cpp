@@ -34,6 +34,8 @@ static void print_help(const char* prog) {
               << "  --list-themes            List all 10 available themes and exit\n"
               << "  -c, --config <file>      Path to custom config.ini\n"
               << "  -k, --cookie <file>      Path to cookies.txt\n"
+              << "  --login <login>          Headless credential login; pair with --password\n"
+              << "  --password <password>    Password for --login (prints result and exits)\n"
               << "  -h, --help               Show this help message and exit\n\n"
               << "Navigation & Keybindings:\n"
               << "  h, j, k, l               Vim movement across tabs, trees, and lists\n"
@@ -74,6 +76,8 @@ int main(int argc, char* argv[]) {
     Config::get().apply_env_overrides();
 
     // 2. Parse CLI arguments
+    std::string cli_user;
+    std::string cli_pass;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -93,10 +97,48 @@ int main(int argc, char* argv[]) {
             Config::get().load(config_path);
         } else if ((arg == "-k" || arg == "--cookie") && i + 1 < argc) {
             Config::get().cookie_path = argv[++i];
+        } else if (arg == "--login" && i + 1 < argc) {
+            cli_user = argv[++i];
+        } else if (arg == "--password" && i + 1 < argc) {
+            cli_pass = argv[++i];
         }
     }
 
+    // 2b. Headless credential login (testing / scripting helper).
+    if (!cli_user.empty() || !cli_pass.empty()) {
+        if (cli_user.empty() || cli_pass.empty()) {
+            std::cerr << "error: --login and --password must be used together\n";
+            return 2;
+        }
+        network::global_init();
+
+        const std::string cookie = network::cookie_file_path();
+        std::string login_err;
+        if (!network::do_login(cli_user, cli_pass, cookie, login_err)) {
+            std::cerr << "login failed: " << login_err << "\n";
+            network::global_cleanup();
+            return 1;
+        }
+
+        Profile prof;
+        std::string prof_err;
+        if (!network::fetch_profile(cookie, prof, prof_err)) {
+            std::cerr << "logged in, but profile fetch failed: " << prof_err << "\n";
+            network::global_cleanup();
+            return 1;
+        }
+
+        std::cout << "logged in as @" << prof.login;
+        if (!prof.display_name.empty() && prof.display_name != prof.login)
+            std::cout << " (" << prof.display_name << ")";
+        std::cout << "\n";
+        network::global_cleanup();
+        return 0;
+    }
+
     std::signal(SIGINT, handle_sigint);
+
+    network::global_init();
 
     SharedState    state;
     NetworkWorker  worker(state);
@@ -231,6 +273,32 @@ int main(int argc, char* argv[]) {
         worker.enqueue({ NetTaskKind::LoadSubjectPreview, pdf, std::to_string(page) });
     };
 
+    // Execute the action at index `idx` of the currently open action menu.
+    // Shared by keyboard (Enter) and mouse selection so both paths stay in sync.
+    auto run_action = [&](int idx) {
+        if (idx < 0 || idx >= (int)action_items.size()) return;
+        if (!action_items[idx].second) return;
+        if (idx == 0) {
+            std::string pdf;
+            if (pdf_preview::subject_pdf_path(action_target, pdf)) {
+                request_preview(pdf, 0);
+                subject_modal_open = true;
+                subject_scroll     = 0;
+            }
+        } else if (idx == 1) {
+            std::string pdf;
+            if (pdf_preview::subject_pdf_path(action_target, pdf)) {
+                std::string cmd = "xdg-open '" + pdf + "' >/dev/null 2>&1 &";
+                int rc = std::system(cmd.c_str());
+                (void)rc;
+                std::lock_guard<std::mutex> lk(state.mtx);
+                state.status_msg = "Opening subject externally…";
+            }
+        } else if (idx == 2) {
+            worker.enqueue({ NetTaskKind::DownloadSubject, action_target, "" });
+        }
+    };
+
     // Login state
     bool login_mode     = false;
     int  login_method   = 0; // 0: Credentials, 1: Cookie String, 2: Cookie File
@@ -346,6 +414,7 @@ int main(int argc, char* argv[]) {
             preview_snap = state.preview;
         }
         bool preview_panel = !login_mode && !subject_modal_open &&
+                             !action_menu_open && !theme_switcher_open &&
                              (current_tab == Tab::Projects || current_tab == Tab::Roadmap);
 
         // Draw the current frame
@@ -358,7 +427,7 @@ int main(int argc, char* argv[]) {
                       cluster_room,
                       preview_panel, preview_snap,
                       subject_modal_open, subject_scroll,
-                      action_items, action_menu_sel);
+                      action_menu_open, action_items, action_menu_sel);
 
         int ch = getch();
         if (ch == ERR) continue;
@@ -444,6 +513,29 @@ int main(int argc, char* argv[]) {
         // ── Project action menu ───────────────────────────────────────────────
         if (action_menu_open) {
             int n = (int)action_items.size();
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                if (getmouse(&ev) == OK) {
+                    if (ev.bstate & (BUTTON4_PRESSED | BUTTON4_CLICKED)) {
+                        if (n) action_menu_sel = (action_menu_sel + n - 1) % n;
+                    } else if (ev.bstate & (BUTTON5_PRESSED | BUTTON5_CLICKED)) {
+                        if (n) action_menu_sel = (action_menu_sel + 1) % n;
+                    } else if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED)) {
+                        MouseHit hit = renderer.hit_test(ev.y, ev.x);
+                        if (hit.action == MouseAction::ActionRow &&
+                            hit.index >= 0 && hit.index < n) {
+                            action_menu_sel = hit.index;
+                            if (action_items[hit.index].second) {
+                                run_action(hit.index);
+                                action_menu_open = false;
+                            }
+                        } else {
+                            action_menu_open = false;
+                        }
+                    }
+                }
+                continue;
+            }
             if (ch == 'j' || ch == KEY_DOWN) {
                 if (n) action_menu_sel = (action_menu_sel + 1) % n;
                 continue;
@@ -457,28 +549,7 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             if (ch == '\n' || ch == KEY_ENTER) {
-                if (action_menu_sel >= 0 && action_menu_sel < n &&
-                    action_items[action_menu_sel].second) {
-                    if (action_menu_sel == 0) {
-                        std::string pdf;
-                        if (pdf_preview::subject_pdf_path(action_target, pdf)) {
-                            request_preview(pdf, 0);
-                            subject_modal_open = true;
-                            subject_scroll = 0;
-                        }
-                    } else if (action_menu_sel == 1) {
-                        std::string pdf;
-                        if (pdf_preview::subject_pdf_path(action_target, pdf)) {
-                            std::string cmd = "xdg-open '" + pdf + "' >/dev/null 2>&1 &";
-                            int rc = std::system(cmd.c_str());
-                            (void)rc;
-                            std::lock_guard<std::mutex> lk(state.mtx);
-                            state.status_msg = "Opening subject externally…";
-                        }
-                    } else if (action_menu_sel == 2) {
-                        worker.enqueue({ NetTaskKind::DownloadSubject, action_target, "" });
-                    }
-                }
+                run_action(action_menu_sel);
                 action_menu_open = false;
                 continue;
             }
@@ -1083,5 +1154,6 @@ int main(int argc, char* argv[]) {
 
     image_renderer::clear_kitty_images();
     worker.stop();
+    network::global_cleanup();
     return 0;
 }

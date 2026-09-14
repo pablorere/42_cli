@@ -9,6 +9,15 @@ namespace network {
 using DataCallback = std::function<void(const std::string& html, bool ok)>;
 
 /**
+ * Initialize libcurl globally.  Must be called once from the main thread
+ * before NetworkWorker spawns its worker thread.
+ */
+void global_init();
+
+/** Release libcurl global resources.  Call once at shutdown. */
+void global_cleanup();
+
+/**
  * Blocking HTTP GET.  Returns the response body.
  * cookie_file path is used for both reading and writing cookies.
  */

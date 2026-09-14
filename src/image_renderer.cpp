@@ -146,6 +146,15 @@ bool has_image(const std::string& key) {
     return s_img_cache.find(key) != s_img_cache.end();
 }
 
+bool image_dimensions(const std::string& key, int& out_w, int& out_h) {
+    std::lock_guard<std::mutex> lk(s_img_mtx);
+    auto it = s_img_cache.find(key);
+    if (it == s_img_cache.end()) return false;
+    out_w = it->second.width;
+    out_h = it->second.height;
+    return out_w > 0 && out_h > 0;
+}
+
 // ─── Clamp an image box to the visible terminal area ──────────────────────────
 // Returns false when there is no room left to draw anything legible, so callers
 // can bail out instead of emitting escapes that wrap/crush the picture.

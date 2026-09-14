@@ -94,15 +94,6 @@ Renderer::Renderer() {
         use_default_colors();
         const auto& pal = theme::get_theme(Config::get().theme);
         theme::apply_theme_to_ncurses(pal);
-
-        // Fixed palette for cluster cell avatar badges (pairs 23..30).
-        if (COLORS >= 256) {
-            static const short badge_colors[8] = {
-                196, 208, 46, 51, 201, 226, 39, 213
-            };
-            for (int i = 0; i < 8; ++i)
-                init_pair(static_cast<short>(23 + i), badge_colors[i], -1);
-        }
     }
 
     getmaxyx(stdscr, rows_, cols_);
@@ -157,13 +148,6 @@ static void hline_box(int row, int col, int width) {
 static std::string pad(const std::string& s, int w) {
     if ((int)s.size() >= w) return s.substr(0, w);
     return s + std::string(w - s.size(), ' ');
-}
-
-// Deterministic 0..7 palette slot for a login (used by the cell avatar badge).
-static int thumb_color_index(const std::string& s) {
-    unsigned int h = 2166136261u;
-    for (unsigned char c : s) { h ^= c; h *= 16777619u; }
-    return static_cast<int>(h % 8u);
 }
 
 static std::string normalize_host(const std::string& h) {
@@ -280,6 +264,7 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                     const SubjectPreview& preview,
                     bool subject_modal,
                     int subject_scroll,
+                    bool action_menu_open,
                     const std::vector<std::pair<std::string, bool>>& action_items,
                     int action_sel)
 {
@@ -356,28 +341,34 @@ void Renderer::draw(SharedState& state, Tab current_tab,
         preview_img_ = draw_subject_modal(preview, subject_scroll);
     }
 
-    if (!action_items.empty()) {
+    if (action_menu_open && !action_items.empty()) {
         curs_set(0);
         draw_action_menu(action_items, action_sel);
     }
 
     refresh();
 
-    // Render photos after ncurses refresh()
+    // Render photos after ncurses refresh(). Kitty graphics persist on the
+    // terminal independently of ncurses, so whenever the set or placement of
+    // images changes we must delete the previous ones or stale pictures would
+    // stay painted on screen (e.g. after closing the preview modal).
     if (!login_mode && data_ready) {
+        struct Placement {
+            std::string key;
+            int row, col, w, h;
+        };
+        std::vector<Placement> placements;
+
         if (preview_img_.visible && preview.is_image && !preview.image_key.empty()) {
-            image_renderer::render_image(preview.image_key,
-                                         preview_img_.row, preview_img_.col,
-                                         preview_img_.w, preview_img_.h, rows_, cols_);
+            placements.push_back({preview.image_key, preview_img_.row, preview_img_.col,
+                                  preview_img_.w, preview_img_.h});
         }
 
         int avail_h = content_bottom - content_top;
         if (avail_h >= 20 && left_w >= 24 && !prof.avatar_url.empty()) {
             int avatar_h = (avail_h >= 24) ? 7 : 6;
-            int inner_h = avatar_h - 1;
-            int inner_w = left_w - 6;
-            image_renderer::render_image(prof.avatar_url, content_top + 2, 3,
-                                         inner_w, inner_h, rows_, cols_);
+            placements.push_back({prof.avatar_url, content_top + 2, 3,
+                                  left_w - 6, avatar_h - 1});
         }
 
         if (current_tab == Tab::Cluster && cluster_sel >= 0 && !prof.cluster_students.empty()) {
@@ -389,11 +380,35 @@ void Renderer::draw(SharedState& state, Tab current_tab,
                 const int drow   = content_bottom - card_h;
                 ClusterPhotoBox box = cluster_photo_box(left_w, cols_ - left_w, drow, card_h);
                 if (box.visible) {
-                    image_renderer::render_image(cs->cdn_uri, box.pfy + 1, box.pfx + 1,
-                                                 box.pfw - 2, box.pfh - 1, rows_, cols_);
+                    placements.push_back({cs->cdn_uri, box.pfy + 1, box.pfx + 1,
+                                          box.pfw - 2, box.pfh - 1});
                 }
             }
         }
+
+        std::string sig;
+        for (const auto& p : placements) {
+            sig += p.key;
+            sig += ':';
+            sig += std::to_string(p.row);
+            sig += ',';
+            sig += std::to_string(p.col);
+            sig += ',';
+            sig += std::to_string(p.w);
+            sig += ',';
+            sig += std::to_string(p.h);
+            sig += ';';
+        }
+        if (sig != image_sig_) {
+            image_renderer::clear_kitty_images();
+            image_sig_ = sig;
+        }
+
+        for (const auto& p : placements)
+            image_renderer::render_image(p.key, p.row, p.col, p.w, p.h, rows_, cols_);
+    } else if (!image_sig_.empty()) {
+        image_renderer::clear_kitty_images();
+        image_sig_.clear();
     }
 
     curs_set(0);
@@ -1976,9 +1991,45 @@ Renderer::ImageBox Renderer::draw_subject_panel(const SubjectPreview& pv,
 Renderer::ImageBox Renderer::draw_subject_modal(const SubjectPreview& pv, int scroll) {
     ImageBox box;
 
-    int bw = std::min(cols_ - 4, 120);
-    int bh = rows_ - 4;
-    if (bw < 30 || bh < 10) return box;
+    const int max_bw = std::min(cols_ - 4, 120);
+    const int max_bh = rows_ - 4;
+    if (max_bw < 30 || max_bh < 10) return box;
+
+    // Interior limits (border + 1 cell padding on each side, and the fixed
+    // header/divider/footer chrome rows).
+    const int max_cw = std::max(1, max_bw - 4);
+    const int max_ch = std::max(1, max_bh - 5);
+
+    // Size the modal to its content so it looks snug instead of a fixed slab.
+    int content_w = max_cw;
+    int content_h = max_ch;
+
+    if (pv.is_image && !pv.image_key.empty()) {
+        int iw = 0, ih = 0;
+        if (image_renderer::image_dimensions(pv.image_key, iw, ih) && iw > 0 && ih > 0) {
+            // Terminal cells are ~1:2 (w:h), so a cell-accurate fit is
+            // cols ≈ rows * 2 * (img_w / img_h).
+            content_h = max_ch;
+            content_w = static_cast<int>(
+                static_cast<long long>(content_h) * 2 * iw / ih);
+            if (content_w > max_cw) {
+                content_w = max_cw;
+                content_h = static_cast<int>(
+                    static_cast<long long>(content_w) * ih / (2 * iw));
+            }
+            content_w = std::max(1, content_w);
+            content_h = std::max(1, content_h);
+        }
+    } else if (!pv.text_lines.empty()) {
+        size_t longest = 0;
+        for (const auto& line : pv.text_lines)
+            longest = std::max(longest, line.size());
+        content_w = std::clamp(static_cast<int>(longest), 1, max_cw);
+        content_h = std::clamp(static_cast<int>(pv.text_lines.size()), 1, max_ch);
+    }
+
+    int bw = std::clamp(content_w + 4, 30, max_bw);
+    int bh = std::clamp(content_h + 5, 10, max_bh);
     int bx = (cols_ - bw) / 2;
     int by = (rows_ - bh) / 2;
 
@@ -2098,6 +2149,7 @@ void Renderer::draw_action_menu(const std::vector<std::pair<std::string, bool>>&
         bool enabled = items[i].second;
         bool active  = (i == sel);
         int ry = by + 1 + i;
+        add_hitbox(ry, bx + 1, 1, bw - 2, MouseAction::ActionRow, i);
         if (active && enabled) {
             attron(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
             fill_row(ry, bx + 1, bw - 2);
@@ -2112,7 +2164,7 @@ void Renderer::draw_action_menu(const std::vector<std::pair<std::string, bool>>&
     }
 
     attron(COLOR_PAIR(CP_DIM));
-    std::string footer = "[j/k] Move  │  [1-4] Jump  │  [Enter] Select  │  [Esc] Cancel";
+    std::string footer = "[j/k] Move | [Enter] Pick | Click | [Esc] Quit";
     mvprint_clip(by + bh - 1, bx + (bw - (int)footer.size()) / 2, footer, bw - 4);
     attroff(COLOR_PAIR(CP_DIM));
 }
@@ -2454,13 +2506,10 @@ void Renderer::draw_cluster(const Profile& p, int room, int sel, int top, int bo
                         attroff(COLOR_PAIR(CP_ROW_SEL) | A_BOLD);
                     }
 
-                    // "Mini photo" fallback: a colour block with the login initial.
-                    int badge_cp = 23 + thumb_color_index(cs->login);
-                    unsigned char initial = cs->login.empty()
-                        ? '?' : static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(cs->login[0])));
-                    attron(COLOR_PAIR(badge_cp) | A_REVERSE | A_BOLD);
-                    mvaddch(cur_y, col_x, static_cast<chtype>(initial));
-                    attroff(COLOR_PAIR(badge_cp) | A_REVERSE | A_BOLD);
+                    // Green online indicator for every occupied desk.
+                    attron(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
+                    mvaddstr(cur_y, col_x, "●");
+                    attroff(COLOR_PAIR(CP_SUCCESS) | A_BOLD);
 
                     std::string text = "@" + cs->login;
                     if (is_selected) {

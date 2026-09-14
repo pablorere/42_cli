@@ -29,6 +29,12 @@ bool load_image_from_bytes(const std::string& key, const std::string& data);
 bool has_image(const std::string& key);
 
 /**
+ * Fetches the pixel dimensions of a cached image.
+ * Returns false when the key is unknown.
+ */
+bool image_dimensions(const std::string& key, int& out_w, int& out_h);
+
+/**
  * Unified image renderer:
  * Automatically uses Kitty Graphics Protocol (native screen pixel density,
  * zero pixelation) in Ghostty/Kitty/WezTerm, or falls back to 24-bit ANSI
